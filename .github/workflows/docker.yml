@@ -8,14 +8,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v2
+
+      - name: Generate image tag
+        run: echo "::set-env name=tag::$(date +%y%m%d)-$(git rev-parse --short HEAD)"
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v1
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
+          username: sepa
           password: ${{ secrets.DOCKER_PASSWORD }}
           repository: sepa/thanos-kit
-          tag_with_ref: true
+          tags: latest,${{ env.tag }}
           add_git_labels: true
