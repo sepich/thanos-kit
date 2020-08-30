@@ -14,8 +14,9 @@ import (
 )
 
 const extpromPrefix = "thanos_bucket_"
+
 var (
-	inspectColumns = []string{"ULID", "FROM", "RANGE", "LVL", "RES", "#SAMPLES", "#CHUNKS", "LABELS", "SRC" }
+	inspectColumns = []string{"ULID", "FROM", "RANGE", "LVL", "RES", "#SAMPLES", "#CHUNKS", "LABELS", "SRC"}
 )
 
 func main() {
@@ -24,12 +25,19 @@ func main() {
 	logLevel := app.Flag("log.level", "Log filtering level (info, debug).").
 		Default("info").Enum("error", "warn", "info", "debug")
 
-	cmdInspect := app.Command("inspect", "Inspect all blocks in the bucket in detailed, table-like way")
-	objStoreConfig := regCommonObjStoreFlags(cmdInspect, "", true)
-	selector := cmdInspect.Flag("selector", "Selects blocks based on label, e.g. '-l key1=\\\"value1\\\" -l key2=\\\"value2\\\"'. All key value pairs must match.").Short('l').
+	inspectCmd := app.Command("inspect", "Inspect all blocks in the bucket in detailed, table-like way")
+	inspectStoreConfig := regCommonObjStoreFlags(inspectCmd, "", true)
+	inspectSelector := inspectCmd.Flag("selector", "Selects blocks based on label, e.g. '-l key1=\\\"value1\\\" -l key2=\\\"value2\\\"'. All key value pairs must match.").Short('l').
 		PlaceHolder("<name>=\\\"<value>\\\"").Strings()
-	sortBy := cmdInspect.Flag("sort-by", "Sort by columns. It's also possible to sort by multiple columns, e.g. '--sort-by FROM --sort-by LABELS'. I.e., if the 'FROM' value is equal the rows are then further sorted by the 'LABELS' value.").
+	inspectSortBy := inspectCmd.Flag("sort-by", "Sort by columns. It's also possible to sort by multiple columns, e.g. '--sort-by FROM --sort-by LABELS'. I.e., if the 'FROM' value is equal the rows are then further sorted by the 'LABELS' value.").
 		Default("FROM", "LABELS").Enums(inspectColumns...)
+
+	analyzeCmd := app.Command("analyze", "Analyze churn, label pair cardinality.")
+	analyzeStoreConfig := regCommonObjStoreFlags(analyzeCmd, "", true)
+	analyzeULID := analyzeCmd.Arg("ULID", "Block id to analyze (ULID).").Required().String()
+	analyzeLimit := analyzeCmd.Flag("limit", "How many items to show in each list.").Default("20").Int()
+	analyzeDataDir := analyzeCmd.Flag("data-dir", "Data directory in which to cache blocks").
+		Default("./data").String()
 
 	parsedCmd := kingpin.MustParse(app.Parse(os.Args[1:]))
 	var logger log.Logger
@@ -53,10 +61,12 @@ func main() {
 	)
 
 	switch parsedCmd {
-		case cmdInspect.FullCommand():
-			os.Exit(checkErr(Inspect(objStoreConfig, selector, *sortBy, logger, metrics)))
+	case inspectCmd.FullCommand():
+		os.Exit(checkErr(Inspect(inspectStoreConfig, inspectSelector, *inspectSortBy, logger, metrics)))
+	case analyzeCmd.FullCommand():
+		os.Exit(checkErr(Analyze(analyzeStoreConfig, analyzeULID, analyzeLimit, analyzeDataDir, logger, metrics)))
 	}
-	fmt.Println(parsedCmd, objStoreConfig, selector, logLevel)
+	fmt.Println(parsedCmd, inspectStoreConfig, inspectSelector, logLevel)
 }
 
 func regCommonObjStoreFlags(cmd *kingpin.CmdClause, suffix string, required bool, extraDesc ...string) *extflag.PathOrContent {

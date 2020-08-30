@@ -211,7 +211,7 @@ func getStrIndex(strings []string, s string) int {
 
 // humanizeDuration returns more humane string for duration
 func humanizeDuration(d time.Duration) string {
-	if d % (24*time.Hour) == 0 {
+	if d%(24*time.Hour) == 0 {
 		return fmt.Sprintf("%dd", d/(24*time.Hour))
 	}
 	s := d.String()
