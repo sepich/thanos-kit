@@ -25,7 +25,7 @@ import (
 	"time"
 )
 
-func Inspect(objStoreConfig *extflag.PathOrContent, selector *[]string, sortBy []string, logger log.Logger, metrics *prometheus.Registry) error {
+func inspect(objStoreConfig *extflag.PathOrContent, selector *[]string, sortBy []string, logger log.Logger, metrics *prometheus.Registry) error {
 	selectorLabels, err := parseFlagLabels(*selector)
 	if err != nil {
 		return errors.Wrap(err, "error parsing selector flag")

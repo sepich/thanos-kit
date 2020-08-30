@@ -8,8 +8,10 @@ import (
 	"github.com/prometheus/common/version"
 	"github.com/thanos-io/thanos/pkg/extflag"
 	"gopkg.in/alecthomas/kingpin.v2"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -39,6 +41,14 @@ func main() {
 	analyzeDataDir := analyzeCmd.Flag("data-dir", "Data directory in which to cache blocks").
 		Default("./data").String()
 
+	dumpCmd := app.Command("dump", "Dump samples from a TSDB.")
+	dumpStoreConfig := regCommonObjStoreFlags(dumpCmd, "", true)
+	dumpULIDs := dumpCmd.Arg("ULID", "Block(s) id (ULID) to dump (multiple ids should be separated by space)").Required().Strings()
+	dumpDataDir := dumpCmd.Flag("data-dir", "Data directory in which to cache blocks").
+		Default("./data").String()
+	dumpMinTime := dumpCmd.Flag("min-time", "Minimum timestamp to dump.").Default("0").Int64()
+	dumpMaxTime := dumpCmd.Flag("max-time", "Maximum timestamp to dump.").Default(strconv.FormatInt(math.MaxInt64, 10)).Int64()
+
 	parsedCmd := kingpin.MustParse(app.Parse(os.Args[1:]))
 	var logger log.Logger
 	{
@@ -62,9 +72,11 @@ func main() {
 
 	switch parsedCmd {
 	case inspectCmd.FullCommand():
-		os.Exit(checkErr(Inspect(inspectStoreConfig, inspectSelector, *inspectSortBy, logger, metrics)))
+		os.Exit(checkErr(inspect(inspectStoreConfig, inspectSelector, *inspectSortBy, logger, metrics)))
 	case analyzeCmd.FullCommand():
-		os.Exit(checkErr(Analyze(analyzeStoreConfig, analyzeULID, analyzeLimit, analyzeDataDir, logger, metrics)))
+		os.Exit(checkErr(analyze(analyzeStoreConfig, analyzeULID, analyzeDataDir, analyzeLimit, logger, metrics)))
+	case dumpCmd.FullCommand():
+		os.Exit(checkErr(dump(dumpStoreConfig, dumpULIDs, dumpDataDir, dumpMinTime, dumpMaxTime, logger, metrics)))
 	}
 	fmt.Println(parsedCmd, inspectStoreConfig, inspectSelector, logLevel)
 }

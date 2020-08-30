@@ -24,7 +24,7 @@ import (
 
 var merr tsdb_errors.MultiError
 
-func Analyze(objStoreConfig *extflag.PathOrContent, id *string, limit *int, dir *string, logger log.Logger, metrics *prometheus.Registry) error {
+func analyze(objStoreConfig *extflag.PathOrContent, id *string, dir *string, limit *int, logger log.Logger, metrics *prometheus.Registry) error {
 	confContentYaml, err := objStoreConfig.Content()
 	if err != nil {
 		return err
