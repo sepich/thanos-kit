@@ -16,4 +16,7 @@ require (
 )
 
 // https://github.com/golang/go/issues/33558
-replace k8s.io/client-go => k8s.io/client-go v0.0.0-20190620085101-78d2af792bab
+replace (
+	github.com/Azure/go-autorest => github.com/Azure/go-autorest v12.2.0+incompatible
+	k8s.io/client-go => k8s.io/client-go v0.0.0-20190620085101-78d2af792bab
+)
