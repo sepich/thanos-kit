@@ -22,7 +22,7 @@ var (
 )
 
 func main() {
-	app := kingpin.New(filepath.Base(os.Args[0]), "Tooling to work with Thanos blobs in object storage")
+	app := kingpin.New(filepath.Base(os.Args[0]), "Tooling to work with Thanos blobs in object storage").Version(version.Print("thanos-kit"))
 	app.HelpFlag.Short('h')
 	logLevel := app.Flag("log.level", "Log filtering level (info, debug).").
 		Default("info").Enum("error", "warn", "info", "debug")
@@ -67,7 +67,6 @@ func main() {
 	metrics.MustRegister(
 		version.NewCollector("thanos"),
 		prometheus.NewGoCollector(),
-		prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
 	)
 
 	switch parsedCmd {

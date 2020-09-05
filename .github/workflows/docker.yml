@@ -8,16 +8,20 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/setup-go@v2
+        with:
+          go-version: 1.15.1
+
       - uses: actions/checkout@v2
 
-      - name: Generate image tag
-        run: echo "::set-env name=tag::$(date +%y%m%d)-$(git rev-parse --short HEAD)"
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v1
+      - uses: actions/cache@v2
         with:
-          username: sepa
-          password: ${{ secrets.DOCKER_PASSWORD }}
-          repository: sepa/thanos-kit
-          tags: latest,${{ env.tag }}
-          add_git_labels: true
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+
+      - run: make docker-push
+        env:
+          DOCKER_USERNAME: sepa
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
