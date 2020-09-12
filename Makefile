@@ -21,13 +21,13 @@ build: ## Build binaries with version set
 	-X github.com/prometheus/common/version.BuildDate=`date +%Y%m%d-%H:%M:%S`"
 
 .PHONY: docker
-ifeq ($(OS)_$(ARCH), linux_x86_64)
+ifeq ($(strip $(OS))_$(strip $(ARCH)), linux_x86_64)
 docker: build
-	@echo "$(OS)_$(ARCH)"
+	@echo "-$(OS)_$(ARCH)-"
 	@docker build -t "thanos-kit" -f ci.dockerfile .
 else
 docker: ## Builds 'thanos-kit' docker with no tag
-	@echo "$(OS)_$(ARCH)"
+	@echo "-$(OS)_$(ARCH)-"
 	@docker build -t "thanos-kit" .
 endif
 
