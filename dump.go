@@ -3,6 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/oklog/ulid"
@@ -15,9 +19,6 @@ import (
 	"github.com/thanos-io/thanos/pkg/extflag"
 	"github.com/thanos-io/thanos/pkg/objstore/client"
 	"github.com/thanos-io/thanos/pkg/runutil"
-	"os"
-	"path/filepath"
-	"time"
 )
 
 func dump(objStoreConfig *extflag.PathOrContent, ids *[]string, dir *string, mint, maxt *int64, logger log.Logger, metrics *prometheus.Registry) error {

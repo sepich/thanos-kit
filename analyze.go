@@ -3,6 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"time"
+
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/oklog/ulid"
@@ -16,10 +21,6 @@ import (
 	"github.com/thanos-io/thanos/pkg/extflag"
 	"github.com/thanos-io/thanos/pkg/objstore/client"
 	"github.com/thanos-io/thanos/pkg/runutil"
-	"os"
-	"path/filepath"
-	"sort"
-	"time"
 )
 
 var merr tsdb_errors.MultiError

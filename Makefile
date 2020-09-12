@@ -1,7 +1,7 @@
 DOCKER_IMAGE ?= 'sepa/thanos-kit'
 VER ?= `git show -s --format=%cd-%h --date=format:%y%m%d`
-OS ?= $(shell uname -s | tr '[A-Z]' '[a-z]')
-ARCH ?= $(shell uname -m)
+OS ?= `uname -s | tr '[A-Z]' '[a-z]'`
+ARCH ?= `uname -m`
 
 help: ## Displays help
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-z0-9A-Z_-]+:.*?##/ { printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)

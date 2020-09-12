@@ -3,6 +3,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
 	"github.com/go-kit/kit/log"
 	"github.com/oklog/ulid"
 	"github.com/olekukonko/tablewriter"
@@ -18,11 +24,10 @@ import (
 	"github.com/thanos-io/thanos/pkg/runutil"
 	"golang.org/x/text/language"
 	"golang.org/x/text/message"
-	"os"
-	"sort"
-	"strconv"
-	"strings"
-	"time"
+)
+
+var (
+	inspectColumns = []string{"ULID", "FROM", "RANGE", "LVL", "RES", "#SAMPLES", "#CHUNKS", "LABELS", "SRC"}
 )
 
 func inspect(objStoreConfig *extflag.PathOrContent, selector *[]string, sortBy []string, logger log.Logger, metrics *prometheus.Registry) error {

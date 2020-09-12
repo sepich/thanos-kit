@@ -2,24 +2,21 @@ package main
 
 import (
 	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/version"
 	"github.com/thanos-io/thanos/pkg/extflag"
 	"gopkg.in/alecthomas/kingpin.v2"
-	"math"
-	"os"
-	"path/filepath"
-	"strconv"
-	"strings"
 )
 
 const extpromPrefix = "thanos_bucket_"
-
-var (
-	inspectColumns = []string{"ULID", "FROM", "RANGE", "LVL", "RES", "#SAMPLES", "#CHUNKS", "LABELS", "SRC"}
-)
 
 func main() {
 	app := kingpin.New(filepath.Base(os.Args[0]), "Tooling to work with Thanos blobs in object storage").Version(version.Print("thanos-kit"))
