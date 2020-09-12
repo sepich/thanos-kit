@@ -39,6 +39,11 @@ func dump(objStoreConfig *extflag.PathOrContent, ids *[]string, dir *string, min
 		}
 	}()
 
+	err = wipeDir(*dir, logger)
+	if err != nil {
+		return errors.Wrapf(err, "cleanup dir %s", *dir)
+	}
+
 	ctx, _ := context.WithCancel(context.Background())
 	for _, id := range *ids {
 		bdir := filepath.Join(*dir, id)
@@ -49,12 +54,12 @@ func dump(objStoreConfig *extflag.PathOrContent, ids *[]string, dir *string, min
 		}
 		level.Info(logger).Log("msg", "downloaded block", "id", id, "duration", time.Since(begin))
 	}
-	os.Mkdir(filepath.Join(*dir, "wal"), 0666)
-	return dumpSamples(*dir, *mint, *maxt)
+	os.Mkdir(filepath.Join(*dir, "wal"), 0777)
+	return dumpSamples(*dir, *mint, *maxt, logger)
 }
 
 // https://github.com/prometheus/prometheus/blob/6573bf42f2431470e375faa515f282eb36865007/cmd/promtool/tsdb.go#L566
-func dumpSamples(path string, mint, maxt int64) (err error) {
+func dumpSamples(path string, mint, maxt int64, logger log.Logger) (err error) {
 	db, err := tsdb.OpenDBReadOnly(path, nil)
 	if err != nil {
 		return err
@@ -75,10 +80,12 @@ func dumpSamples(path string, mint, maxt int64) (err error) {
 	for ss.Next() {
 		series := ss.At()
 		lbs := series.Labels()
+		nm := lbs.Get("__name__")
+		lbs = lbs.WithoutLabels("__name__")
 		it := series.Iterator()
 		for it.Next() {
 			ts, val := it.At()
-			fmt.Printf("%s %g %d\n", lbs, val, ts)
+			fmt.Printf("%s%s %g %d\n", nm, lbs, val, ts)
 		}
 		if it.Err() != nil {
 			return ss.Err()
@@ -95,6 +102,11 @@ func dumpSamples(path string, mint, maxt int64) (err error) {
 
 	if ss.Err() != nil {
 		return ss.Err()
+	}
+
+	err = wipeDir(path, logger)
+	if err != nil {
+		return errors.Wrapf(err, "cleanup dir %s", path)
 	}
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/go-kit/kit/log"
@@ -18,6 +19,7 @@ import (
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
 	"github.com/thanos-io/thanos/pkg/block"
+	"github.com/thanos-io/thanos/pkg/block/metadata"
 	"github.com/thanos-io/thanos/pkg/extflag"
 	"github.com/thanos-io/thanos/pkg/objstore/client"
 	"github.com/thanos-io/thanos/pkg/runutil"
@@ -69,6 +71,12 @@ func analyzeBlock(path, blockID string, limit int) error {
 
 	meta := block.Meta()
 	fmt.Printf("Block ID: %s\n", meta.ULID)
+	m, err := metadata.Read(filepath.Join(path, blockID))
+	if err != nil {
+		return errors.Wrapf(err, "fail to read meta.json for %s", blockID)
+	}
+	fmt.Printf("Thanos Labels: %s\n", labelsToString(m.Thanos.Labels))
+
 	// Presume 1ms resolution that Prometheus uses.
 	fmt.Printf("Duration: %s\n", (time.Duration(meta.MaxTime-meta.MinTime) * 1e6).String())
 	fmt.Printf("Series: %d\n", meta.Stats.NumSeries)
@@ -230,4 +238,15 @@ func openBlock(path, blockID string) (*tsdb.DBReadOnly, tsdb.BlockReader, error)
 		return nil, nil, fmt.Errorf("block %s not found", blockID)
 	}
 	return db, block, nil
+}
+
+// labelsToString returns labels as comma separated k=v pairs
+func labelsToString(lables map[string]string) string {
+	pairs := make([]string, len(lables))
+	i := 0
+	for k, v := range lables {
+		pairs[i] = fmt.Sprintf("%s=%s", k, v)
+		i++
+	}
+	return strings.Join(pairs, ", ")
 }
