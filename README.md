@@ -45,7 +45,7 @@ You can use it to restore another prometheus partial dump, or any metrics export
 You are free to export/convert your existing data to this format, into one **time-sorted** text file.
 
 Sample file `rrd_exported_data.txt` (`[metric]{[labels]} [number value] [timestamp ms]`):
-```json
+```ini
 collectd_df_complex{host="myserver.fqdn.com",df="var-log",dimension="free"} 5.8093906125e+10 1599771600000
 collectd_varnish_derive{host="myserver.fqdn.com",varnish="request_rate",dimension="MAIN.client_req"} 2.3021666667e+01 1599771600000
 collectd_df_complex{host="myserver.fqdn.com",df="var-log",dimension="free"} 5.8093906125e+10 1599771615000
