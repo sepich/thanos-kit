@@ -1,7 +1,7 @@
 DOCKER_IMAGE ?= 'sepa/thanos-kit'
 VER ?= `git show -s --format=%cd-%h --date=format:%y%m%d`
-OS ?= `uname -s | tr '[A-Z]' '[a-z]'`
-ARCH ?= `uname -m`
+export OS ?= `uname -s | tr '[A-Z]' '[a-z]'`
+export ARCH ?= `uname -m`
 
 help: ## Displays help
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n\nTargets:\n"} /^[a-z0-9A-Z_-]+:.*?##/ { printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
@@ -23,11 +23,11 @@ build: ## Build binaries with version set
 .PHONY: docker
 ifeq ($(OS)_$(ARCH), linux_x86_64)
 docker: build
-	@echo ${OS}_${ARCH}
+	@echo "$(OS)_$(ARCH)"
 	@docker build -t "thanos-kit" -f ci.dockerfile .
 else
 docker: ## Builds 'thanos-kit' docker with no tag
-	@echo ${OS}_${ARCH}
+	@echo "$(OS)_$(ARCH)"
 	@docker build -t "thanos-kit" .
 endif
 
