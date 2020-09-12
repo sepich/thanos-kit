@@ -23,9 +23,11 @@ build: ## Build binaries with version set
 .PHONY: docker
 ifeq ($(OS)_$(ARCH), linux_x86_64)
 docker: build
+	@echo ${OS}_${ARCH}
 	@docker build -t "thanos-kit" -f ci.dockerfile .
 else
 docker: ## Builds 'thanos-kit' docker with no tag
+	@echo ${OS}_${ARCH}
 	@docker build -t "thanos-kit" .
 endif
 
