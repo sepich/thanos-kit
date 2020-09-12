@@ -1,6 +1,6 @@
 DOCKER_IMAGE ?= 'sepa/thanos-kit'
 VER ?= `git show -s --format=%cd-%h --date=format:%y%m%d`
-OS ?= $(shell uname -s | tr '[A-Z]' '[a-z]')  # use shell here bc used in if
+OS ?= $(shell uname -s | tr '[A-Z]' '[a-z]')
 ARCH ?= $(shell uname -m)
 
 help: ## Displays help
@@ -21,7 +21,7 @@ build: ## Build binaries with version set
 	-X github.com/prometheus/common/version.BuildDate=`date +%Y%m%d-%H:%M:%S`"
 
 .PHONY: docker
-ifeq ($(OS)_$(ARCH), darwin_x86_64)
+ifeq ($(OS)_$(ARCH), linux_x86_64)
 docker: build
 	@docker build -t "thanos-kit" -f ci.dockerfile .
 else
