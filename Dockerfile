@@ -6,7 +6,7 @@ COPY go.mod go.sum ./
 RUN go mod download -x
 # resets caches
 COPY . .
-RUN make build
+RUN make test && make build
 
 FROM quay.io/prometheus/busybox:latest
 COPY --from=builder /build/thanos-kit /bin/thanos-kit

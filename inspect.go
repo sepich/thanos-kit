@@ -51,8 +51,6 @@ func inspect(objStoreConfig *extflag.PathOrContent, selector *[]string, sortBy [
 		return err
 	}
 
-	// Dummy actor to immediately kill the group after the run function returns.
-	//g.Add(func() error { return nil }, func(error) {})
 	defer runutil.CloseWithLogOnErr(logger, bkt, "bucket client")
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -74,12 +72,16 @@ func parseFlagLabels(s []string) (labels.Labels, error) {
 		if len(parts) != 2 {
 			return nil, errors.Errorf("unrecognized label %q", l)
 		}
-		if !model.LabelName.IsValid(model.LabelName(string(parts[0]))) {
+		if !model.LabelName.IsValid(model.LabelName(parts[0])) {
 			return nil, errors.Errorf("unsupported format for label %s", l)
 		}
-		val, err := strconv.Unquote(parts[1])
-		if err != nil {
-			return nil, errors.Wrap(err, "unquote label value")
+		val := strings.TrimSpace(parts[1])
+		if strings.Index(parts[1], `"`) != -1 {
+			var err error
+			val, err = strconv.Unquote(parts[1])
+			if err != nil {
+				return nil, errors.Wrap(err, "unquote label value")
+			}
 		}
 		lset = append(lset, labels.Label{Name: parts[0], Value: val})
 	}

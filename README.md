@@ -87,4 +87,4 @@ docker run -it --rm \
         --label=replica=\"prom-a\" \ 
         --label=location=\"us-east1\"
 ```
-Current implementation reads all imported data into memory, and then flushes as TSDB 2h blocks. In case you have OOM but want to import large amount of data, you can split imported file by days (or 2h windows) and do multiple separate imports. Anyway these separate blocks would be compacted to larger one on bucket side via your compactor.
+Current implementation reads all imported data into memory, and then flushes as TSDB 2h blocks. In case you have OOM but want to import large amount of data, you can split imported file by days (or 2h windows) and do multiple separate imports. Anyway these separate blocks would be compacted to larger one on bucket side via your compactor. Please note that compactor has default `--consistency-delay=30m` which is based on file upload time (not ULID), so it could take some time before compactor would start processing these blocks.

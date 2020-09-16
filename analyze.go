@@ -50,7 +50,7 @@ func analyze(objStoreConfig *extflag.PathOrContent, id *string, dir *string, lim
 	begin := time.Now()
 	err = block.Download(ctx, logger, bkt, ulid.MustParse(*id), bdir)
 	if err != nil {
-		return errors.Wrapf(err, "download block %s", id)
+		return errors.Wrapf(err, "download block %s", *id)
 	}
 	level.Info(logger).Log("msg", "downloaded block", "id", *id, "duration", time.Since(begin))
 

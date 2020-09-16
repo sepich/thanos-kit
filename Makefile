@@ -11,6 +11,10 @@ deps: ## Ensures fresh go.mod and go.sum
 	@go mod tidy
 	@go mod verify
 
+.PHONY: test
+test: ## Run unit tests
+	@go test ./...
+
 .PHONY: build
 build: ## Build binaries with version set
 	@CGO_ENABLED=0 go build -ldflags "-w -s \
@@ -22,7 +26,7 @@ build: ## Build binaries with version set
 
 .PHONY: docker
 ifeq ($(OS)_$(ARCH), linux_x86_64)
-docker: build
+docker: test build
 	@docker build -t "thanos-kit" -f ci.dockerfile .
 else
 docker: ## Builds 'thanos-kit' docker with no tag

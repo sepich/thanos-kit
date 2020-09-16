@@ -26,8 +26,7 @@ func main() {
 
 	inspectCmd := app.Command("inspect", "Inspect all blocks in the bucket in detailed, table-like way")
 	inspectStoreConfig := regCommonObjStoreFlags(inspectCmd, "", true)
-	inspectSelector := inspectCmd.Flag("selector", "Selects blocks based on label, e.g. '-l key1=\\\"value1\\\" -l key2=\\\"value2\\\"'. All key value pairs must match").Short('l').
-		PlaceHolder("<name>=\\\"<value>\\\"").Strings()
+	inspectSelector := inspectCmd.Flag("label", `Selects blocks based on label, e.g. '-l key1="value1" -l key2="value2"'. All key value pairs must match`).Short('l').PlaceHolder(`<name>="<value>"`).Strings()
 	inspectSortBy := inspectCmd.Flag("sort-by", "Sort by columns. It's also possible to sort by multiple columns, e.g. '--sort-by FROM --sort-by LABELS'. I.e., if the 'FROM' value is equal the rows are then further sorted by the 'LABELS' value").
 		Default("FROM", "LABELS").Enums(inspectColumns...)
 
@@ -52,7 +51,7 @@ func main() {
 	importBlockSize := importCmd.Flag("block-size", "The maximum block size. The actual block timestamps will be aligned with Prometheus time ranges").Default("2h").Hidden().Duration()
 	importDataDir := importCmd.Flag("data-dir", "Data directory in which to cache blocks").
 		Default("./data").String()
-	importLabels := importCmd.Flag("label", "Labels to add as Thanos block metadata (repeated)").PlaceHolder("<name>=\"<value>\"").Required().Strings()
+	importLabels := importCmd.Flag("label", "Labels to add as Thanos block metadata (repeated)").Short('l').PlaceHolder(`<name>="<value>"`).Required().Strings()
 
 	parsedCmd := kingpin.MustParse(app.Parse(os.Args[1:]))
 	var logger log.Logger
