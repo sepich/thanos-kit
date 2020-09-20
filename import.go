@@ -13,7 +13,6 @@ import (
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/thanos-io/thanos/pkg/block"
-	"github.com/thanos-io/thanos/pkg/extflag"
 	"github.com/thanos-io/thanos/pkg/objstore/client"
 	"github.com/thanos-io/thanos/pkg/runutil"
 
@@ -21,11 +20,8 @@ import (
 	"github.com/sepich/thanos-kit/importer/blocks"
 )
 
-func backfill(objStoreConfig *extflag.PathOrContent, importFromFile *string, importBlockSize *time.Duration, importDataDir *string, importLabels *[]string, logger log.Logger, metrics *prometheus.Registry) (err error) {
-	confContentYaml, err := objStoreConfig.Content()
-	if err != nil {
-		return err
-	}
+func backfill(objStoreConfig []byte, importFromFile *string, importBlockSize *time.Duration, importDataDir *string, importLabels *[]string, logger log.Logger, metrics *prometheus.Registry) (err error) {
+
 
 	err = wipeDir(*importDataDir, logger)
 	if err != nil {
@@ -56,7 +52,7 @@ func backfill(objStoreConfig *extflag.PathOrContent, importFromFile *string, imp
 	}
 
 	// upload blocks to obj storage
-	bkt, err := client.NewBucket(logger, confContentYaml, metrics, "bucket")
+	bkt, err := client.NewBucket(logger, objStoreConfig, metrics, "bucket")
 	if err != nil {
 		return err
 	}

@@ -18,7 +18,6 @@ import (
 	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
-	"github.com/thanos-io/thanos/pkg/extflag"
 	"github.com/thanos-io/thanos/pkg/extprom"
 	"github.com/thanos-io/thanos/pkg/objstore/client"
 	"github.com/thanos-io/thanos/pkg/runutil"
@@ -30,18 +29,13 @@ var (
 	inspectColumns = []string{"ULID", "FROM", "RANGE", "LVL", "RES", "#SAMPLES", "#CHUNKS", "LABELS", "SRC"}
 )
 
-func inspect(objStoreConfig *extflag.PathOrContent, selector *[]string, sortBy []string, logger log.Logger, metrics *prometheus.Registry) error {
+func inspect(objStoreConfig []byte, selector *[]string, sortBy []string, logger log.Logger, metrics *prometheus.Registry) error {
 	selectorLabels, err := parseFlagLabels(*selector)
 	if err != nil {
 		return errors.Wrap(err, "error parsing selector flag")
 	}
 
-	confContentYaml, err := objStoreConfig.Content()
-	if err != nil {
-		return err
-	}
-
-	bkt, err := client.NewBucket(logger, confContentYaml, metrics, "bucket")
+	bkt, err := client.NewBucket(logger, objStoreConfig, metrics, "bucket")
 	if err != nil {
 		return err
 	}
@@ -148,7 +142,7 @@ func printTable(blockMetas map[ulid.ULID]*metadata.Meta, selectorLabels labels.L
 // the selector with the correct value.
 func matchesSelector(blockMeta *metadata.Meta, selectorLabels labels.Labels) bool {
 	for _, l := range selectorLabels {
-		if v, ok := blockMeta.Thanos.Labels[l.Name]; !ok || v != l.Value {
+		if v, ok := blockMeta.Thanos.Labels[l.Name]; !ok || (l.Value != "*" && v != l.Value) {
 			return false
 		}
 	}

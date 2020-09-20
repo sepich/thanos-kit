@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -16,18 +17,12 @@ import (
 	"github.com/prometheus/prometheus/tsdb"
 	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
 	"github.com/thanos-io/thanos/pkg/block"
-	"github.com/thanos-io/thanos/pkg/extflag"
 	"github.com/thanos-io/thanos/pkg/objstore/client"
 	"github.com/thanos-io/thanos/pkg/runutil"
 )
 
-func dump(objStoreConfig *extflag.PathOrContent, ids *[]string, dir *string, mint, maxt *int64, logger log.Logger, metrics *prometheus.Registry) error {
-	confContentYaml, err := objStoreConfig.Content()
-	if err != nil {
-		return err
-	}
-
-	bkt, err := client.NewBucket(logger, confContentYaml, metrics, "bucket")
+func dump(objStoreConfig []byte, ids *[]string, dir *string, mint, maxt *int64, out io.Writer, logger log.Logger, metrics *prometheus.Registry) error {
+	bkt, err := client.NewBucket(logger, objStoreConfig, metrics, "bucket")
 	if err != nil {
 		return err
 	}
@@ -55,11 +50,11 @@ func dump(objStoreConfig *extflag.PathOrContent, ids *[]string, dir *string, min
 		level.Info(logger).Log("msg", "downloaded block", "id", id, "duration", time.Since(begin))
 	}
 	os.Mkdir(filepath.Join(*dir, "wal"), 0777)
-	return dumpSamples(*dir, *mint, *maxt, logger)
+	return dumpSamples(*dir, *mint, *maxt, out, logger)
 }
 
 // https://github.com/prometheus/prometheus/blob/6573bf42f2431470e375faa515f282eb36865007/cmd/promtool/tsdb.go#L566
-func dumpSamples(path string, mint, maxt int64, logger log.Logger) (err error) {
+func dumpSamples(path string, mint, maxt int64, out io.Writer, logger log.Logger) (err error) {
 	db, err := tsdb.OpenDBReadOnly(path, nil)
 	if err != nil {
 		return err
@@ -85,7 +80,7 @@ func dumpSamples(path string, mint, maxt int64, logger log.Logger) (err error) {
 		it := series.Iterator()
 		for it.Next() {
 			ts, val := it.At()
-			fmt.Printf("%s%s %g %d\n", nm, lbs, val, ts)
+			fmt.Fprintf(out,"%s%s %g %d\n", nm, lbs, val, ts)
 		}
 		if it.Err() != nil {
 			return ss.Err()

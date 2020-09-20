@@ -65,7 +65,7 @@ func Test_matchesSelector(t *testing.T) {
 				"label3 ": "value3 ",
 			},
 			selectorLabels: labels.Labels{
-				{"label", "value"},
+				{"label", "*"},
 				{"label3 ", "value3 "},
 			},
 			res: true,

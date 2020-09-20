@@ -20,20 +20,14 @@ import (
 	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
 	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
-	"github.com/thanos-io/thanos/pkg/extflag"
 	"github.com/thanos-io/thanos/pkg/objstore/client"
 	"github.com/thanos-io/thanos/pkg/runutil"
 )
 
 var merr tsdb_errors.MultiError
 
-func analyze(objStoreConfig *extflag.PathOrContent, id *string, dir *string, limit *int, logger log.Logger, metrics *prometheus.Registry) error {
-	confContentYaml, err := objStoreConfig.Content()
-	if err != nil {
-		return err
-	}
-
-	bkt, err := client.NewBucket(logger, confContentYaml, metrics, "bucket")
+func analyze(objStoreConfig []byte, id *string, dir *string, limit *int, logger log.Logger, metrics *prometheus.Registry) error {
+	bkt, err := client.NewBucket(logger, objStoreConfig, metrics, "bucket")
 	if err != nil {
 		return err
 	}
