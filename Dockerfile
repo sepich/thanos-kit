@@ -6,7 +6,7 @@ RUN go mod download -x
 # resets caches
 COPY . .
 ARG VER
-RUN make test && make build
+RUN make build
 
 FROM quay.io/prometheus/busybox:latest
 COPY --from=builder /build/thanos-kit /bin/thanos-kit

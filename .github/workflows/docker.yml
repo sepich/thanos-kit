@@ -10,6 +10,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # tests takes too long inside docker arm buildx
+      - uses: actions/setup-go@v4
+        with:
+          go-version-file: go.mod
+      - run: |
+          make test
+          GOOS=darwin GOARCH=arm64 make build
+          zip thanos-kit-darwin-arm64.zip thanos-kit
+          GOOS=darwin GOARCH=amd64 make build
+          zip thanos-kit-darwin-amd64.zip thanos-kit
+          GOOS=linux GOARCH=amd64 build
+          zip thanos-kit-linux-amd64.zip thanos-kit
+      - uses: actions/upload-artifact@v3
+        with:
+          path: thanos-kit*.zip
+
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@v3
@@ -40,6 +56,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VER=${{ env.DOCKER_METADATA_OUTPUT_VERSION }}
+            VER=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
