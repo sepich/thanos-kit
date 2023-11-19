@@ -10,6 +10,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: sepa/thanos-kit
+          tags: |
+            type=raw,value={{date 'YYMMDD'}}
+            type=raw,value={{branch}}-{{sha}}
+          flavor: |
+            latest=true
+
       # tests takes too long inside docker arm buildx
       - uses: actions/setup-go@v4
         with:
@@ -22,20 +33,14 @@ jobs:
           zip thanos-kit-darwin-amd64.zip thanos-kit
           GOOS=linux GOARCH=amd64 make build
           zip thanos-kit-linux-amd64.zip thanos-kit
-      - uses: actions/upload-artifact@v3
-        with:
-          path: thanos-kit*.zip
 
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v3
+      - name: Release
+        uses: softprops/action-gh-release@v1
         with:
-          images: sepa/thanos-kit
-          tags: |
-            type=raw,value={{date 'YYMMDD'}}
-            type=raw,value={{branch}}-{{sha}}
-          flavor: |
-            latest=true
+          name: ${{ steps.meta.outputs.version }}
+          draft: true
+          files: thanos-kit*.zip
+          generate_release_notes: true
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -56,6 +61,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            VER=${{ fromJSON(steps.meta.outputs.json).labels['org.opencontainers.image.version'] }}
+            VER=${{ steps.meta.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
