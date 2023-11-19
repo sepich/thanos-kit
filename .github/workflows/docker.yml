@@ -20,7 +20,7 @@ jobs:
           zip thanos-kit-darwin-arm64.zip thanos-kit
           GOOS=darwin GOARCH=amd64 make build
           zip thanos-kit-darwin-amd64.zip thanos-kit
-          GOOS=linux GOARCH=amd64 build
+          GOOS=linux GOARCH=amd64 make build
           zip thanos-kit-linux-amd64.zip thanos-kit
       - uses: actions/upload-artifact@v3
         with:
