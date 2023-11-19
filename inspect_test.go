@@ -3,8 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/prometheus/prometheus/pkg/labels"
-	"github.com/thanos-io/thanos/pkg/block/metadata"
+	"github.com/prometheus/prometheus/model/labels"
 )
 
 func Test_parseFlagLabels(t *testing.T) {
@@ -83,9 +82,9 @@ func Test_matchesSelector(t *testing.T) {
 		},
 	}
 	for _, td := range cases {
-		blockMeta := new(metadata.Meta)
+		blockMeta := Meta{}
 		blockMeta.Thanos.Labels = td.thanosLabels
-		res := matchesSelector(blockMeta, td.selectorLabels)
+		res := matchesSelector(&blockMeta, td.selectorLabels)
 		if res != td.res {
 			t.Errorf("matchesSelector(%q, %q)=%v, wants %v", td.thanosLabels, td.selectorLabels, res, td.res)
 		}

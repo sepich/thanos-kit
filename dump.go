@@ -3,84 +3,70 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
+	"github.com/oklog/ulid"
+	"github.com/pkg/errors"
+	"github.com/prometheus/prometheus/promql/parser"
+	"github.com/prometheus/prometheus/tsdb"
+	"github.com/prometheus/prometheus/tsdb/chunkenc"
+	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
+	"github.com/thanos-io/objstore"
+	"github.com/thanos-io/thanos/pkg/block"
 	"io"
 	"os"
 	"path/filepath"
 	"time"
-
-	"github.com/go-kit/kit/log"
-	"github.com/go-kit/kit/log/level"
-	"github.com/oklog/ulid"
-	"github.com/pkg/errors"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/prometheus/pkg/labels"
-	"github.com/prometheus/prometheus/tsdb"
-	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
-	"github.com/thanos-io/thanos/pkg/block"
-	"github.com/thanos-io/thanos/pkg/objstore/client"
-	"github.com/thanos-io/thanos/pkg/runutil"
 )
 
-func dump(objStoreConfig []byte, ids *[]string, dir *string, mint, maxt *int64, out io.Writer, logger log.Logger, metrics *prometheus.Registry) error {
-	bkt, err := client.NewBucket(logger, objStoreConfig, metrics, "bucket")
-	if err != nil {
-		return err
-	}
-
-	// Ensure we close up everything properly.
-	defer func() {
-		if err != nil {
-			runutil.CloseWithLogOnErr(logger, bkt, "bucket client")
-		}
-	}()
-
-	err = wipeDir(*dir, logger)
-	if err != nil {
-		return errors.Wrapf(err, "cleanup dir %s", *dir)
-	}
-
-	ctx, _ := context.WithCancel(context.Background())
+func dump(bkt objstore.Bucket, out io.Writer, ids *[]string, dir *string, mint, maxt *int64, match *string, logger log.Logger) error {
+	ctx := context.Background()
 	for _, id := range *ids {
-		bdir := filepath.Join(*dir, id)
-		begin := time.Now()
-		err = block.Download(ctx, logger, bkt, ulid.MustParse(id), bdir)
-		if err != nil {
-			return errors.Wrapf(err, "download block %s", id)
+		if err := downloadBlock(ctx, *dir, id, bkt, logger); err != nil {
+			return err
 		}
-		level.Info(logger).Log("msg", "downloaded block", "id", id, "duration", time.Since(begin))
 	}
 	os.Mkdir(filepath.Join(*dir, "wal"), 0777)
-	return dumpSamples(*dir, *mint, *maxt, out, logger)
+	return dumpSamples(out, *dir, *mint, *maxt, *match)
 }
 
-// https://github.com/prometheus/prometheus/blob/6573bf42f2431470e375faa515f282eb36865007/cmd/promtool/tsdb.go#L566
-func dumpSamples(path string, mint, maxt int64, out io.Writer, logger log.Logger) (err error) {
+// https://github.com/prometheus/prometheus/blob/main/cmd/promtool/tsdb.go#L703
+func dumpSamples(out io.Writer, path string, mint, maxt int64, match string) (err error) {
 	db, err := tsdb.OpenDBReadOnly(path, nil)
 	if err != nil {
 		return err
 	}
 	defer func() {
-		merr.Add(err)
-		merr.Add(db.Close())
-		err = merr.Err()
+		err = tsdb_errors.NewMulti(err, db.Close()).Err()
 	}()
-	q, err := db.Querier(context.TODO(), mint, maxt)
+	q, err := db.Querier(context.Background(), mint, maxt)
 	if err != nil {
 		return err
 	}
 	defer q.Close()
 
-	ss := q.Select(false, nil, labels.MustNewMatcher(labels.MatchRegexp, "", ".*"))
+	matchers, err := parser.ParseMetricSelector(match)
+	if err != nil {
+		return err
+	}
+	ss := q.Select(false, nil, matchers...)
 
 	for ss.Next() {
 		series := ss.At()
-		lbs := series.Labels()
-		nm := lbs.Get("__name__")
-		lbs = lbs.WithoutLabels("__name__")
-		it := series.Iterator()
-		for it.Next() {
+		name := series.Labels().Get("__name__")
+		lbs := series.Labels().MatchLabels(false, "__name__")
+		it := series.Iterator(nil)
+		for it.Next() == chunkenc.ValFloat {
 			ts, val := it.At()
-			fmt.Fprintf(out,"%s%s %g %d\n", nm, lbs, val, ts)
+			fmt.Fprintf(out, "%s%s %g %d\n", name, lbs, val, ts)
+		}
+		for it.Next() == chunkenc.ValFloatHistogram {
+			ts, fh := it.AtFloatHistogram()
+			fmt.Fprintf(out, "%s%s %s %d\n", name, lbs, fh.String(), ts)
+		}
+		for it.Next() == chunkenc.ValHistogram {
+			ts, h := it.AtHistogram()
+			fmt.Fprintf(out, "%s%s %s %d\n", name, lbs, h.String(), ts)
 		}
 		if it.Err() != nil {
 			return ss.Err()
@@ -88,20 +74,22 @@ func dumpSamples(path string, mint, maxt int64, out io.Writer, logger log.Logger
 	}
 
 	if ws := ss.Warnings(); len(ws) > 0 {
-		var merr tsdb_errors.MultiError
-		for _, w := range ws {
-			merr.Add(w)
-		}
-		return merr.Err()
+		return tsdb_errors.NewMulti(ws...).Err()
 	}
 
 	if ss.Err() != nil {
 		return ss.Err()
 	}
-
-	err = wipeDir(path, logger)
-	if err != nil {
-		return errors.Wrapf(err, "cleanup dir %s", path)
-	}
 	return nil
+}
+
+// download block id to dir
+func downloadBlock(ctx context.Context, dir, id string, bkt objstore.Bucket, logger log.Logger) error {
+	bdir := filepath.Join(dir, id)
+	begin := time.Now()
+	err := block.Download(ctx, logger, bkt, ulid.MustParse(id), bdir)
+	if err != nil {
+		return errors.Wrapf(err, "download block %s", id)
+	}
+	return level.Info(logger).Log("msg", "downloaded block", "id", id, "duration", time.Since(begin))
 }

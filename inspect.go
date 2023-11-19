@@ -2,61 +2,53 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"github.com/go-kit/log"
+	"github.com/oklog/ulid"
+	"github.com/olekukonko/tablewriter"
+	"github.com/pkg/errors"
+	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/thanos-io/objstore"
+	"github.com/thanos-io/thanos/pkg/block/metadata"
+	"github.com/thanos-io/thanos/pkg/runutil"
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/text/language"
+	"golang.org/x/text/message"
+	"io"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
-
-	"github.com/go-kit/kit/log"
-	"github.com/oklog/ulid"
-	"github.com/olekukonko/tablewriter"
-	"github.com/pkg/errors"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/common/model"
-	"github.com/prometheus/prometheus/pkg/labels"
-	"github.com/thanos-io/thanos/pkg/block"
-	"github.com/thanos-io/thanos/pkg/block/metadata"
-	"github.com/thanos-io/thanos/pkg/extprom"
-	"github.com/thanos-io/thanos/pkg/objstore/client"
-	"github.com/thanos-io/thanos/pkg/runutil"
-	"golang.org/x/text/language"
-	"golang.org/x/text/message"
 )
+
+const concurrency = 32
 
 var (
-	inspectColumns = []string{"ULID", "FROM", "RANGE", "LVL", "RES", "#SAMPLES", "#CHUNKS", "LABELS", "SRC"}
+	inspectColumns = []string{"DIR", "ULID", "FROM", "RANGE", "LVL", "RES", "#SAMPLES", "#CHUNKS", "LABELS", "SRC"}
 )
 
-func inspect(objStoreConfig []byte, selector *[]string, sortBy []string, logger log.Logger, metrics *prometheus.Registry) error {
+type Meta struct {
+	metadata.Meta
+	Prefix string
+}
+
+func inspect(bkt objstore.Bucket, recursive *bool, selector *[]string, sortBy *[]string, logger log.Logger) error {
 	selectorLabels, err := parseFlagLabels(*selector)
 	if err != nil {
 		return errors.Wrap(err, "error parsing selector flag")
 	}
 
-	bkt, err := client.NewBucket(logger, objStoreConfig, metrics, "bucket")
+	ctx := context.Background() // Ctrl-C instead of 5min limit
+	metas, err := getMeta(ctx, bkt, *recursive, logger)
 	if err != nil {
 		return err
 	}
 
-	fetcher, err := block.NewMetaFetcher(logger, 32, bkt, "", extprom.WrapRegistererWithPrefix(extpromPrefix, metrics), nil, nil)
-	if err != nil {
-		return err
-	}
-
-	defer runutil.CloseWithLogOnErr(logger, bkt, "bucket client")
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
-	// Getting Metas.
-	blockMetas, _, err := fetcher.Fetch(ctx)
-	if err != nil {
-		return err
-	}
-
-	return printTable(blockMetas, selectorLabels, sortBy)
+	return printTable(metas, selectorLabels, *sortBy, *recursive)
 }
 
 func parseFlagLabels(s []string) (labels.Labels, error) {
@@ -69,8 +61,8 @@ func parseFlagLabels(s []string) (labels.Labels, error) {
 		if !model.LabelName.IsValid(model.LabelName(parts[0])) {
 			return nil, errors.Errorf("unsupported format for label %s", l)
 		}
-		val := strings.TrimSpace(parts[1])
-		if strings.Index(parts[1], `"`) != -1 {
+		val := parts[1]
+		if strings.Index(val, `"`) != -1 {
 			var err error
 			val, err = strconv.Unquote(parts[1])
 			if err != nil {
@@ -79,12 +71,75 @@ func parseFlagLabels(s []string) (labels.Labels, error) {
 		}
 		lset = append(lset, labels.Label{Name: parts[0], Value: val})
 	}
+	sort.Sort(lset)
 	return lset, nil
 }
 
-func printTable(blockMetas map[ulid.ULID]*metadata.Meta, selectorLabels labels.Labels, sortBy []string) error {
-	header := inspectColumns
+// read mata.json from all blocks in bucket
+func getMeta(ctx context.Context, bkt objstore.Bucket, recursive bool, logger log.Logger) (map[ulid.ULID]*Meta, error) {
+	blocks, err := getBlocks(ctx, bkt, recursive)
+	if err != nil {
+		return nil, err
+	}
+	res := make(map[ulid.ULID]*Meta, len(blocks))
+	mu := sync.RWMutex{}
+	eg := errgroup.Group{}
+	ch := make(chan Block, concurrency)
+	// workers
+	for i := 0; i < concurrency; i++ {
+		eg.Go(func() error {
+			for b := range ch {
+				metaFile := b.Prefix + b.Id.String() + "/" + metadata.MetaFilename
+				r, err := bkt.Get(ctx, metaFile)
+				if bkt.IsObjNotFoundErr(err) {
+					continue // Meta.json was deleted between bkt.Exists and here.
+				}
+				if err != nil {
+					return errors.Wrapf(err, "get meta file: %v", metaFile)
+				}
 
+				defer runutil.CloseWithLogOnErr(logger, r, "close bkt meta get")
+
+				metaContent, err := io.ReadAll(r)
+				if err != nil {
+					return errors.Wrapf(err, "read meta file: %v", metaFile)
+				}
+
+				m := &metadata.Meta{}
+				if err := json.Unmarshal(metaContent, m); err != nil {
+					return errors.Wrapf(err, "%s unmarshal", metaFile)
+				}
+				if m.Version != metadata.ThanosVersion1 {
+					return errors.Errorf("unexpected meta file: %s version: %d", metaFile, m.Version)
+				}
+				mu.Lock()
+				res[b.Id] = &Meta{Meta: *m, Prefix: b.Prefix}
+				mu.Unlock()
+			}
+			return nil
+		})
+	}
+
+	// distribute work
+	eg.Go(func() error {
+		defer close(ch)
+		for _, b := range blocks {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case ch <- b:
+			}
+		}
+		return nil
+	})
+
+	if err := eg.Wait(); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+func printTable(blockMetas map[ulid.ULID]*Meta, selectorLabels labels.Labels, sortBy []string, recursive bool) error {
 	var lines [][]string
 	p := message.NewPrinter(language.English)
 
@@ -95,39 +150,40 @@ func printTable(blockMetas map[ulid.ULID]*metadata.Meta, selectorLabels labels.L
 
 		timeRange := time.Duration((blockMeta.MaxTime - blockMeta.MinTime) * int64(time.Millisecond))
 
-		var lbls []string
-		for _, key := range getKeysAlphabetically(blockMeta.Thanos.Labels) {
-			lbls = append(lbls, fmt.Sprintf("%s=%s", key, blockMeta.Thanos.Labels[key]))
-		}
-
 		var line []string
+		if recursive {
+			line = append(line, blockMeta.Prefix)
+		}
 		line = append(line, blockMeta.ULID.String())
-		line = append(line, time.Unix(blockMeta.MinTime/1000, 0).Format("02-01-2006 15:04:05"))
+		line = append(line, time.Unix(blockMeta.MinTime/1000, 0).Format("2006-01-02 15:04:05"))
 		line = append(line, humanizeDuration(timeRange))
 		line = append(line, p.Sprintf("%d", blockMeta.Compaction.Level))
-		line = append(line, time.Duration(blockMeta.Thanos.Downsample.Resolution*int64(time.Millisecond)).String())
+		line = append(line, humanizeDuration(time.Duration(blockMeta.Thanos.Downsample.Resolution*int64(time.Millisecond))))
 		line = append(line, p.Sprintf("%d", blockMeta.Stats.NumSamples))
 		line = append(line, p.Sprintf("%d", blockMeta.Stats.NumChunks))
-		line = append(line, strings.Join(lbls, ","))
+		line = append(line, labelsToString(blockMeta.Thanos.Labels))
 		line = append(line, string(blockMeta.Thanos.Source))
 		lines = append(lines, line)
 	}
 
+	if !recursive {
+		inspectColumns = inspectColumns[1:]
+	}
 	var sortByColNum []int
 	for _, col := range sortBy {
-		index := getStrIndex(header, col)
+		index := getStrIndex(inspectColumns, col)
 		if index == -1 {
 			return errors.Errorf("column %s not found", col)
 		}
 		sortByColNum = append(sortByColNum, index)
 	}
 
-	t := Table{Header: header, Lines: lines, SortIndices: sortByColNum}
+	t := Table{Header: inspectColumns, Lines: lines, SortIndices: sortByColNum}
 	sort.Sort(t)
 
 	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader(header)
-	table.SetBorders(tablewriter.Border{Left: true, Top: false, Right: true, Bottom: false})
+	table.SetHeader(inspectColumns)
+	table.SetBorders(tablewriter.Border{Left: false, Top: false, Right: false, Bottom: false})
 	table.SetCenterSeparator("|")
 	table.SetAutoWrapText(false)
 	table.SetReflowDuringAutoWrap(false)
@@ -140,7 +196,7 @@ func printTable(blockMetas map[ulid.ULID]*metadata.Meta, selectorLabels labels.L
 
 // matchesSelector checks if blockMeta contains every label from
 // the selector with the correct value.
-func matchesSelector(blockMeta *metadata.Meta, selectorLabels labels.Labels) bool {
+func matchesSelector(blockMeta *Meta, selectorLabels labels.Labels) bool {
 	for _, l := range selectorLabels {
 		if v, ok := blockMeta.Thanos.Labels[l.Name]; !ok || (l.Value != "*" && v != l.Value) {
 			return false
@@ -157,6 +213,44 @@ func getKeysAlphabetically(labels map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// labelsToString returns labels as comma separated k=v pairs
+func labelsToString(lables map[string]string) string {
+	pairs := []string{}
+	for _, k := range getKeysAlphabetically(lables) {
+		pairs = append(pairs, fmt.Sprintf("%s=%s", k, lables[k]))
+	}
+	return strings.Join(pairs, ", ")
+}
+
+// humanizeDuration returns more humane string for duration
+func humanizeDuration(d time.Duration) string {
+	d = d.Truncate(time.Second)
+	if d.Seconds() > 58 {
+		d = d.Round(time.Minute)
+	}
+	if d%(24*time.Hour) == 0 {
+		return fmt.Sprintf("%dd", d/(24*time.Hour))
+	}
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = s[:len(s)-2]
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = s[:len(s)-2]
+	}
+	return s
+}
+
+// getStrIndex calculates the index of s in strings.
+func getStrIndex(strings []string, s string) int {
+	for i, col := range strings {
+		if col == s {
+			return i
+		}
+	}
+	return -1
 }
 
 // Table implements sort.Interface
@@ -182,8 +276,8 @@ func (t Table) Less(i, j int) bool {
 
 // compare values can be either Time, Duration, comma-delimited integers or strings.
 func compare(s1, s2 string) bool {
-	s1Time, s1Err := time.Parse("02-01-2006 15:04:05", s1)
-	s2Time, s2Err := time.Parse("02-01-2006 15:04:05", s2)
+	s1Time, s1Err := time.Parse("2006-01-02 15:04:05", s1)
+	s2Time, s2Err := time.Parse("2006-01-02 15:04:05", s2)
 	if s1Err != nil || s2Err != nil {
 		s1Duration, s1Err := time.ParseDuration(s1)
 		s2Duration, s2Err := time.ParseDuration(s2)
@@ -198,29 +292,4 @@ func compare(s1, s2 string) bool {
 		return s1Duration < s2Duration
 	}
 	return s1Time.Before(s2Time)
-}
-
-// getStrIndex calculates the index of s in strings.
-func getStrIndex(strings []string, s string) int {
-	for i, col := range strings {
-		if col == s {
-			return i
-		}
-	}
-	return -1
-}
-
-// humanizeDuration returns more humane string for duration
-func humanizeDuration(d time.Duration) string {
-	if d%(24*time.Hour) == 0 {
-		return fmt.Sprintf("%dd", d/(24*time.Hour))
-	}
-	s := d.String()
-	if strings.HasSuffix(s, "m0s") {
-		s = s[:len(s)-2]
-	}
-	if strings.HasSuffix(s, "h0m") {
-		s = s[:len(s)-2]
-	}
-	return s
 }
