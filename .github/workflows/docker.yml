@@ -2,7 +2,6 @@ name: CI
 on:
   push:
     branches: [master]
-    tags: ['*']
 
 jobs:
   build:
@@ -10,6 +9,22 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # tests takes too long inside docker arm buildx
+      - uses: actions/setup-go@v4
+        with:
+          go-version-file: go.mod
+      - run: make test
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: sepa
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Docker meta
         id: meta
@@ -21,37 +36,6 @@ jobs:
             type=raw,value={{branch}}-{{sha}}
           flavor: |
             latest=true
-
-      # tests takes too long inside docker arm buildx
-      - uses: actions/setup-go@v4
-        with:
-          go-version-file: go.mod
-      - run: |
-          make test
-          GOOS=darwin GOARCH=arm64 make build
-          zip thanos-kit-darwin-arm64.zip thanos-kit
-          GOOS=darwin GOARCH=amd64 make build
-          zip thanos-kit-darwin-amd64.zip thanos-kit
-          GOOS=linux GOARCH=amd64 make build
-          zip thanos-kit-linux-amd64.zip thanos-kit
-
-      - name: Release
-        uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/') # Release requires tag
-        with:
-          name: ${{ steps.meta.outputs.version }}
-          files: thanos-kit*.zip
-          generate_release_notes: true
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Login to DockerHub
-        uses: docker/login-action@v3
-        with:
-          username: sepa
-          password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Build and push
         id: docker_build

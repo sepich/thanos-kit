@@ -16,7 +16,3 @@ build: ## Build binaries with version set
 
 docker: ## Builds 'thanos-kit' docker with no tag
 	@docker build -t "thanos-kit" .
-
-tag: ## Tags commit to trigger GH Release
-	git tag ${VER}
-	git push --tags
