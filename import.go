@@ -230,16 +230,7 @@ func createBlocks(input []byte, mint, maxt, maxBlockDuration int64, maxSamplesIn
 				}
 				for _, b := range blocks {
 					if b.Meta().ULID == blk {
-						m := metadata.Meta{
-							BlockMeta: b.Meta(),
-							Thanos: metadata.Thanos{
-								Version:    metadata.ThanosVersion1,
-								Labels:     lbls.Map(),
-								Downsample: metadata.ThanosDownsample{Resolution: 0},
-								Source:     "thanos-kit",
-							},
-						}
-						if err = m.WriteToDir(logger, outputDir+"/"+b.Meta().ULID.String()); err != nil {
+						if err = writeThanosMeta(b.Meta(), lbls.Map(), 0, outputDir, logger); err != nil {
 							return fmt.Errorf("write metadata: %w", err)
 						}
 						printBlocks([]tsdb.BlockReader{b}, !wroteHeader, humanReadable)
@@ -298,4 +289,17 @@ func getFormatedBytes(bytes int64, humanReadable bool) string {
 		return units.Base2Bytes(bytes).String()
 	}
 	return strconv.FormatInt(bytes, 10)
+}
+
+func writeThanosMeta(meta tsdb.BlockMeta, lbls map[string]string, res int64, dir string, logger log.Logger) error {
+	m := metadata.Meta{
+		BlockMeta: meta,
+		Thanos: metadata.Thanos{
+			Version:    metadata.ThanosVersion1,
+			Labels:     lbls,
+			Downsample: metadata.ThanosDownsample{Resolution: res},
+			Source:     "thanos-kit",
+		},
+	}
+	return m.WriteToDir(logger, dir+"/"+meta.ULID.String())
 }

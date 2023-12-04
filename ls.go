@@ -28,6 +28,9 @@ func getBlocks(ctx context.Context, bkt objstore.Bucket, recursive bool) (found 
 	if recursive {
 		err = bkt.Iter(ctx, "", func(name string) error {
 			parts := strings.Split(name, "/")
+			if len(parts) < 2 {
+				return nil
+			}
 			dir, file := parts[len(parts)-2], parts[len(parts)-1]
 			if !block.IsBlockMetaFile(file) {
 				return nil

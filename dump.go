@@ -22,6 +22,9 @@ import (
 func dump(bkt objstore.Bucket, out io.Writer, ids *[]string, dir *string, mint, maxt *int64, match *string, logger log.Logger) error {
 	ctx := context.Background()
 	for _, id := range *ids {
+		if _, err := ulid.Parse(id); err != nil {
+			return errors.Wrapf(err, `invalid ULID "%s"`, id)
+		}
 		if err := downloadBlock(ctx, *dir, id, bkt, logger); err != nil {
 			return err
 		}
@@ -55,6 +58,7 @@ func dumpSamples(out io.Writer, path string, mint, maxt int64, match string) (er
 		series := ss.At()
 		name := series.Labels().Get("__name__")
 		lbs := series.Labels().MatchLabels(false, "__name__")
+		// todo: add thanos labels?
 		it := series.Iterator(nil)
 		for it.Next() == chunkenc.ValFloat {
 			ts, val := it.At()
@@ -85,9 +89,9 @@ func dumpSamples(out io.Writer, path string, mint, maxt int64, match string) (er
 
 // download block id to dir
 func downloadBlock(ctx context.Context, dir, id string, bkt objstore.Bucket, logger log.Logger) error {
-	bdir := filepath.Join(dir, id)
+	dest := filepath.Join(dir, id)
 	begin := time.Now()
-	err := block.Download(ctx, logger, bkt, ulid.MustParse(id), bdir)
+	err := block.Download(ctx, logger, bkt, ulid.MustParse(id), dest)
 	if err != nil {
 		return errors.Wrapf(err, "download block %s", id)
 	}

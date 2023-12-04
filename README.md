@@ -6,22 +6,23 @@ Tooling to work with Thanos blocks in object storage.
 - **analyze** - Analyze churn, label pair cardinality for specific block. (same as `promtool tsdb analyze` but also show Labels suitable for block split)
 - **dump** - Dump samples from a TSDB to text format (same as `promtool tsdb dump` but to promtext format)
 - **import** - Import samples to TSDB blocks (same as `promtool tsdb create-blocks-from openmetrics` but from promtext format). Read more about [backfill](#backfill) below
+- **unwrap** - Split one TSDB block to multiple based on Label values. Read more [below](#unwrap)
 
 Cli arguments are mostly the same as for `thanos`, help is available for each sub-command:
 ```
 $ docker run sepa/thanos-kit -h
 usage: thanos-kit [<flags>] <command> [<args> ...]
 
-Tooling to work with Thanos blocks in object storage
+Tooling for Thanos blocks in object storage
 
 Flags:
   -h, --help            Show context-sensitive help (also try --help-long and --help-man).
       --version         Show application version.
       --log.level=info  Log filtering level (info, debug)
       --objstore.config-file=<file-path>
-                        Path to YAML file that contains object store%s configuration. See format details: https://thanos.io/tip/thanos/storage.md/
+                        Path to YAML file that contains object store configuration. See format details: https://thanos.io/tip/thanos/storage.md/
       --objstore.config=<content>
-                        Alternative to 'objstore.config-file' flag (mutually exclusive). Content of YAML file that contains object store%s configuration. See format details: https://thanos.io/tip/thanos/storage.md/
+                        Alternative to 'objstore.config-file' flag (mutually exclusive). Content of YAML file that contains object store configuration. See format details: https://thanos.io/tip/thanos/storage.md/
 
 Commands:
   help [<command>...]
@@ -41,6 +42,9 @@ Commands:
 
   import --input-file=INPUT-FILE --label=<name>="<value>" [<flags>]
     Import samples from text to TSDB blocks
+
+  unwrap [<flags>]
+    Split TSDB block to multiple blocks by Label
 ```
 
 ### Get it
@@ -86,6 +90,60 @@ Please note that compactor has default `--consistency-delay=30m` which is based 
 By default, `thanos-kit` will cache blocks from object storage to `./data` directory, and the dir is not cleaned up on exit. This is to speed up subsequent runs, and to avoid deleting user data when `--data-dir=/tmp` is used for example.
 
 Important note that `dump` command downloads specified blocks to cache dir, but then dump TSDB as a whole (including blocks already present there)
+
+### Unwrap
+
+This could be useful for incorporating Mimir to Thanos world by replacing thanos-receive component. Currently Mimir could accept remote-write, and do instant queries via [sidecar](https://grafana.com/docs/mimir/latest/set-up/migrate/migrate-from-thanos-to-mimir-with-thanos-sidecar/) scheme. But long-term queries via thanos-store would not work with Mimir blocks, as they have no Thanos metadata set. 
+
+Consider this example, we have 2 prometheuses in different locations configured like so:
+```yml
+# first
+global:
+  external_labels:
+    prometheus: A
+    location: dc1
+
+# second
+global:
+  external_labels:
+    prometheus: B
+    location: dc2
+```
+
+And they do remote-write to Mimir, let's take a look at produced block:
+```bash
+# thanos-kit analyze
+Block ID: 01GXGKXC3PA1DE6QNAH2BM2P0R
+Thanos Labels:
+Label names appearing in all Series: [instance, job, prometheus, location]
+```
+
+The block has no Thanos labels set, and each metric inside has labels `[prometheus, location]` coming from external_labels. We can split this block to 2 separate blocks for each original prometheus like this:
+```bash
+# thanos-kit unwrap --relabel-config='[{target_label: __meta_ext_labels, replacement: prometheus}]'
+uploaded block ulid=001
+uploaded block ulid=002
+
+# thanos-kit analyze 001
+Block ID: 001
+Thanos Labels: prometheus=A
+Label names appearing in all Series: [instance, job, location]
+
+# thanos-kit analyze 002
+Block ID: 002
+Thanos Labels: prometheus=B
+Label names appearing in all Series: [instance, job, location]
+```
+Unwrap command takes usual [relabel_config](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#relabel_config) and can modify block data. But additionally special label `__meta_ext_labels` is parsed if assigned, and all label names in it are extracted to unique blocks. You can specify multiple values separated by `;`, in example above to split original Mimir block by both prometheus+location sets:
+```yaml
+  - |
+    --relabel-config=
+    - target_label: __meta_ext_labels
+      replacement: prometheus;location
+```
+And resulting blocks are the same, as would be shipped by `thanos-sidecar`. So they would be compacted without duplicates and wasted space on S3 by compactor afterward. 
+
+This could also be used for blocks produced by thanos-receive too, existing Thanos labels would be merged with extracted ones. Smaller blocks ease thanos-compactor/store sharding, and helps to have different retentions.
 
 ### Alternatives
 - [thanos tools bucket](https://thanos.io/tip/components/tools.md/#bucket)
