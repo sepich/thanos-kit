@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/thanos-io/objstore"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
+	mtd "github.com/thanos-io/thanos/pkg/model"
 	"github.com/thanos-io/thanos/pkg/runutil"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/text/language"
@@ -36,14 +37,14 @@ type Meta struct {
 	Prefix string
 }
 
-func inspect(bkt objstore.Bucket, recursive *bool, selector *[]string, sortBy *[]string, logger log.Logger) error {
+func inspect(bkt objstore.Bucket, recursive *bool, selector *[]string, sortBy *[]string, maxTime *mtd.TimeOrDurationValue, logger log.Logger) error {
 	selectorLabels, err := parseFlagLabels(*selector)
 	if err != nil {
 		return errors.Wrap(err, "error parsing selector flag")
 	}
 
 	ctx := context.Background() // Ctrl-C instead of 5min limit
-	metas, err := getMeta(ctx, bkt, *recursive, logger)
+	metas, err := getAllMetas(ctx, bkt, *recursive, maxTime, logger)
 	if err != nil {
 		return err
 	}
@@ -76,8 +77,8 @@ func parseFlagLabels(s []string) (labels.Labels, error) {
 }
 
 // read mata.json from all blocks in bucket
-func getMeta(ctx context.Context, bkt objstore.Bucket, recursive bool, logger log.Logger) (map[ulid.ULID]*Meta, error) {
-	blocks, err := getBlocks(ctx, bkt, recursive)
+func getAllMetas(ctx context.Context, bkt objstore.Bucket, recursive bool, maxTime *mtd.TimeOrDurationValue, logger log.Logger) (map[ulid.ULID]*Meta, error) {
+	blocks, err := getBlocks(ctx, bkt, recursive, maxTime)
 	if err != nil {
 		return nil, err
 	}
@@ -89,28 +90,12 @@ func getMeta(ctx context.Context, bkt objstore.Bucket, recursive bool, logger lo
 	for i := 0; i < concurrency; i++ {
 		eg.Go(func() error {
 			for b := range ch {
-				metaFile := b.Prefix + b.Id.String() + "/" + metadata.MetaFilename
-				r, err := bkt.Get(ctx, metaFile)
+				m, err := getMeta(ctx, b, bkt, logger)
 				if bkt.IsObjNotFoundErr(err) {
 					continue // Meta.json was deleted between bkt.Exists and here.
 				}
 				if err != nil {
-					return errors.Wrapf(err, "get meta file: %v", metaFile)
-				}
-
-				defer runutil.CloseWithLogOnErr(logger, r, "close bkt meta get")
-
-				metaContent, err := io.ReadAll(r)
-				if err != nil {
-					return errors.Wrapf(err, "read meta file: %v", metaFile)
-				}
-
-				m := &metadata.Meta{}
-				if err := json.Unmarshal(metaContent, m); err != nil {
-					return errors.Wrapf(err, "%s unmarshal", metaFile)
-				}
-				if m.Version != metadata.ThanosVersion1 {
-					return errors.Errorf("unexpected meta file: %s version: %d", metaFile, m.Version)
+					return err
 				}
 				mu.Lock()
 				res[b.Id] = &Meta{Meta: *m, Prefix: b.Prefix}
@@ -292,4 +277,32 @@ func compare(s1, s2 string) bool {
 		return s1Duration < s2Duration
 	}
 	return s1Time.Before(s2Time)
+}
+
+// get block Metadata from bucket
+func getMeta(ctx context.Context, b Block, bkt objstore.Bucket, logger log.Logger) (*metadata.Meta, error) {
+	metaFile := b.Prefix + b.Id.String() + "/" + metadata.MetaFilename
+	r, err := bkt.Get(ctx, metaFile)
+	if bkt.IsObjNotFoundErr(err) {
+		return nil, err // continue
+	}
+	if err != nil {
+		return nil, errors.Wrapf(err, "get meta file: %v", metaFile)
+	}
+
+	defer runutil.CloseWithLogOnErr(logger, r, "close bkt meta get")
+
+	metaContent, err := io.ReadAll(r)
+	if err != nil {
+		return nil, errors.Wrapf(err, "read meta file: %v", metaFile)
+	}
+
+	m := &metadata.Meta{}
+	if err := json.Unmarshal(metaContent, m); err != nil {
+		return nil, errors.Wrapf(err, "%s unmarshal", metaFile)
+	}
+	if m.Version != metadata.ThanosVersion1 {
+		return nil, errors.Errorf("unexpected meta file: %s version: %d", metaFile, m.Version)
+	}
+	return m, nil
 }

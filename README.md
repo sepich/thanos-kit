@@ -93,7 +93,7 @@ Important note that `dump` command downloads specified blocks to cache dir, but 
 
 ### Unwrap
 
-This could be useful for incorporating Mimir to Thanos world by replacing thanos-receive component. Currently Mimir could accept remote-write, and do instant queries via [sidecar](https://grafana.com/docs/mimir/latest/set-up/migrate/migrate-from-thanos-to-mimir-with-thanos-sidecar/) scheme. But long-term queries via thanos-store would not work with Mimir blocks, as they have no Thanos metadata set. 
+This could be useful for incorporating Mimir to Thanos world by replacing thanos-receive component. Currently Mimir could accept remote-write, and do instant queries via [sidecar](https://grafana.com/docs/mimir/latest/set-up/migrate/migrate-from-thanos-to-mimir-with-thanos-sidecar/) scheme or via [thanos-promql-connector](https://github.com/thanos-community/thanos-promql-connector). But long-term queries via thanos-store would not work with Mimir blocks, as they have no Thanos metadata set. 
 
 Consider this example, we have 2 prometheuses in different locations configured like so:
 ```yml

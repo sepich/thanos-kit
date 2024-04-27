@@ -17,6 +17,7 @@ import (
 	"github.com/thanos-io/objstore/client"
 	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
+	"github.com/thanos-io/thanos/pkg/model"
 	"github.com/thanos-io/thanos/pkg/runutil"
 	"gopkg.in/yaml.v2"
 	"math"
@@ -31,7 +32,7 @@ import (
 
 const metaExtLabels = "__meta_ext_labels"
 
-func unwrap(bkt objstore.Bucket, unwrapRelabel extkingpin.PathOrContent, recursive bool, dir *string, wait *time.Duration, unwrapDry bool, outConfig *extkingpin.PathOrContent, logger log.Logger) (err error) {
+func unwrap(bkt objstore.Bucket, unwrapRelabel extkingpin.PathOrContent, recursive bool, dir *string, wait *time.Duration, unwrapDry bool, outConfig *extkingpin.PathOrContent, maxTime *model.TimeOrDurationValue, unwrapSrc *string, logger log.Logger) (err error) {
 	relabelContentYaml, err := unwrapRelabel.Content()
 	if err != nil {
 		return fmt.Errorf("get content of relabel configuration: %w", err)
@@ -52,16 +53,26 @@ func unwrap(bkt objstore.Bucket, unwrapRelabel extkingpin.PathOrContent, recursi
 
 	processBucket := func() error {
 		begin := time.Now()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
-		blocks, err := getBlocks(ctx, bkt, recursive)
+		blocks, err := getBlocks(ctx, bkt, recursive, maxTime)
 		if err != nil {
 			return err
 		}
 		for _, b := range blocks {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer cancel()
-			if err := unwrapBlock(ctx, bkt, b, relabelConfig, *dir, unwrapDry, dst, logger); err != nil {
+			if *unwrapSrc != "" {
+				m, err := getMeta(ctx, b, bkt, logger)
+				if bkt.IsObjNotFoundErr(err) {
+					continue // Meta.json was deleted between bkt.Exists and here.
+				}
+				if err != nil {
+					return err
+				}
+				if string(m.Thanos.Source) != *unwrapSrc {
+					continue
+				}
+			}
+			if err := unwrapBlock(bkt, b, relabelConfig, *dir, unwrapDry, dst, logger); err != nil {
 				return err
 			}
 		}
@@ -79,7 +90,7 @@ func unwrap(bkt objstore.Bucket, unwrapRelabel extkingpin.PathOrContent, recursi
 	})
 }
 
-func unwrapBlock(ctx context.Context, bkt objstore.Bucket, b Block, relabelConfig []*relabel.Config, dir string, unwrapDry bool, dst objstore.Bucket, logger log.Logger) error {
+func unwrapBlock(bkt objstore.Bucket, b Block, relabelConfig []*relabel.Config, dir string, unwrapDry bool, dst objstore.Bucket, logger log.Logger) error {
 	if err := runutil.DeleteAll(dir); err != nil {
 		return fmt.Errorf("unable to cleanup cache folder %s: %w", dir, err)
 	}
@@ -92,8 +103,10 @@ func unwrapBlock(ctx context.Context, bkt objstore.Bucket, b Block, relabelConfi
 	}
 
 	// prepare input
+	ctxd, canceld := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer canceld()
 	pb := objstore.NewPrefixedBucket(bkt, b.Prefix)
-	if err := downloadBlock(ctx, inDir, b.Id.String(), pb, logger); err != nil {
+	if err := downloadBlock(ctxd, inDir, b.Id.String(), pb, logger); err != nil {
 		return err
 	}
 	os.Mkdir(path.Join(inDir, "wal"), 0777)
@@ -108,7 +121,7 @@ func unwrapBlock(ctx context.Context, bkt objstore.Bucket, b Block, relabelConfi
 	defer func() {
 		err = tsdb_errors.NewMulti(err, db.Close()).Err()
 	}()
-	q, err := db.Querier(ctx, 0, math.MaxInt64)
+	q, err := db.Querier(context.Background(), 0, math.MaxInt64)
 	if err != nil {
 		return err
 	}
@@ -132,7 +145,7 @@ func unwrapBlock(ctx context.Context, bkt objstore.Bucket, b Block, relabelConfi
 		}
 
 		lbs, extl := extractLabels(rl, strings.Split(rl.Get(metaExtLabels), ";"))
-		tdb, err := mw.getTenant(ctx, extl)
+		tdb, err := mw.getTenant(context.Background(), extl)
 		if err != nil {
 			return err
 		}
@@ -170,21 +183,25 @@ func unwrapBlock(ctx context.Context, bkt objstore.Bucket, b Block, relabelConfi
 		return tsdb_errors.NewMulti(ws...).Err()
 	}
 
-	blocks, err := mw.flush(ctx)
+	blocks, err := mw.flush(context.Background())
 	if unwrapDry {
 		level.Info(logger).Log("msg", "dry-run: skipping upload of created blocks and delete of original block", "ulids", fmt.Sprint(blocks), "orig", b.Id)
 	} else {
 		for _, id := range blocks {
 			begin := time.Now()
-			err = block.Upload(ctx, logger, dst, filepath.Join(outDir, id.String()), metadata.SHA256Func)
+			ctxu, cancelu := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancelu()
+			err = block.Upload(ctxu, logger, dst, filepath.Join(outDir, id.String()), metadata.SHA256Func)
 			if err != nil {
 				return fmt.Errorf("upload block %s: %v", id, err)
 			}
 			level.Info(logger).Log("msg", "uploaded block", "ulid", id, "duration", time.Since(begin))
 		}
 		level.Info(logger).Log("msg", "deleting original block", "ulid", b.Id)
-		if err := pb.Delete(ctx, b.Id.String()); err != nil {
-			return fmt.Errorf("delete block %s/%s: %v", b.Prefix, b.Id, err)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if err := block.Delete(ctx, logger, pb, b.Id); err != nil {
+			return fmt.Errorf("delete block %s%s: %v", b.Prefix, b.Id, err)
 		}
 	}
 

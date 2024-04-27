@@ -7,6 +7,7 @@ import (
 	"github.com/go-kit/log/level"
 	"github.com/prometheus/common/version"
 	"github.com/thanos-io/objstore/client"
+	"github.com/thanos-io/thanos/pkg/model"
 	"gopkg.in/alecthomas/kingpin.v2"
 	"math"
 	"os"
@@ -22,12 +23,16 @@ func main() {
 
 	lsCmd := app.Command("ls", "List all blocks in the bucket.")
 	lsRecursive := lsCmd.Flag("recursive", "Recurive search for blocks in the  bucket (Mimir has blocks nested to tenants folders)").Short('r').Default("false").Bool()
+	lsMaxTime := model.TimeOrDuration(lsCmd.Flag("max-time", "End of time range limit to get blocks. List only those, which happened earlier than this value. Option can be a constant time in RFC3339 format or time duration relative to current time, such as -1d or 2h45m. Valid duration units are ms, s, m, h, d, w, y.").
+		Default("9999-12-31T23:59:59Z"))
 
 	inspectCmd := app.Command("inspect", "Inspect all blocks in the bucket in detailed, table-like way")
 	inspectRecursive := inspectCmd.Flag("recursive", "Recursive search for blocks in the bucket (Mimir has blocks nested to tenants folders)").Short('r').Default("false").Bool()
 	inspectSelector := inspectCmd.Flag("label", `Filter by Thanos block label, e.g. '-l key1="value1" -l key2="value2"'. All key value pairs must match. To select all blocks for some key use "*" as value.`).Short('l').PlaceHolder(`<name>="<value>"`).Strings()
 	inspectSortBy := inspectCmd.Flag("sort-by", "Sort by columns. It's also possible to sort by multiple columns, e.g. '--sort-by FROM --sort-by LABELS'. I.e., if the 'FROM' value is equal the rows are then further sorted by the 'LABELS' value").
 		Default("FROM", "LABELS").Enums(inspectColumns...)
+	inspectMaxTime := model.TimeOrDuration(inspectCmd.Flag("max-time", "End of time range limit to get blocks. Inspect only those, which happened earlier than this value. Option can be a constant time in RFC3339 format or time duration relative to current time, such as -1d or 2h45m. Valid duration units are ms, s, m, h, d, w, y.").
+		Default("9999-12-31T23:59:59Z"))
 
 	analyzeCmd := app.Command("analyze", "Analyze churn, label pair cardinality and find labels to split on")
 	analyzeULID := analyzeCmd.Arg("ULID", "Block id to analyze (ULID)").Required().String()
@@ -58,6 +63,9 @@ func main() {
 	unwrapWait := unwrapCmd.Flag("wait-interval", "Wait interval between consecutive runs and bucket refreshes. Run once if 0.").Default("5m").Short('w').Duration()
 	unwrapDry := unwrapCmd.Flag("dry-run", "Don't do any changes to bucket. Only print what would be done.").Default("false").Bool()
 	unwrapDst := extkingpin.RegisterPathOrContent(unwrapCmd, "dst.config", "YAML file that contains destination object store configuration for generated blocks.", extkingpin.WithEnvSubstitution(), extkingpin.WithRequired())
+	unwrapMaxTime := model.TimeOrDuration(unwrapCmd.Flag("max-time", "End of time range limit to get blocks. Unwrap only those, which happened earlier than this value. Option can be a constant time in RFC3339 format or time duration relative to current time, such as -1d or 2h45m. Valid duration units are ms, s, m, h, d, w, y.").
+		Default("9999-12-31T23:59:59Z"))
+	unwrapSrc := unwrapCmd.Flag("source", "Only process blocks produced by this source (e.g `compactor`). Empty means process all blocks").Default("").String()
 
 	cmd := kingpin.MustParse(app.Parse(os.Args[1:]))
 	var logger log.Logger
@@ -82,9 +90,9 @@ func main() {
 
 	switch cmd {
 	case lsCmd.FullCommand():
-		exitCode(ls(bkt, lsRecursive))
+		exitCode(ls(bkt, lsRecursive, lsMaxTime))
 	case inspectCmd.FullCommand():
-		exitCode(inspect(bkt, inspectRecursive, inspectSelector, inspectSortBy, logger))
+		exitCode(inspect(bkt, inspectRecursive, inspectSelector, inspectSortBy, inspectMaxTime, logger))
 	case analyzeCmd.FullCommand():
 		exitCode(analyze(bkt, analyzeULID, analyzeDir, analyzeLimit, analyzeMatchers, logger))
 	case dumpCmd.FullCommand():
@@ -92,7 +100,7 @@ func main() {
 	case importCmd.FullCommand():
 		exitCode(importMetrics(bkt, importFromFile, importBlockSize, importDir, importLabels, *importUpload, logger))
 	case unwrapCmd.FullCommand():
-		exitCode(unwrap(bkt, *unwrapRelabel, *unwrapRecursive, unwrapDir, unwrapWait, *unwrapDry, unwrapDst, logger))
+		exitCode(unwrap(bkt, *unwrapRelabel, *unwrapRecursive, unwrapDir, unwrapWait, *unwrapDry, unwrapDst, unwrapMaxTime, unwrapSrc, logger))
 	}
 }
 
