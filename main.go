@@ -58,6 +58,7 @@ func main() {
 
 	unwrapCmd := app.Command("unwrap", "Split TSDB block to multiple blocks by Label")
 	unwrapRelabel := extkingpin.RegisterPathOrContent(unwrapCmd, "relabel-config", fmt.Sprintf("YAML file that contains relabeling configuration. Set %s=name1;name2;... to split separate blocks for each uniq label combination.", metaExtLabels), extkingpin.WithEnvSubstitution(), extkingpin.WithRequired())
+	unwrapMetaRelabel := extkingpin.RegisterPathOrContent(unwrapCmd, "meta-relabel", "YAML file that contains relabeling configuration for block labels (meta.json)", extkingpin.WithEnvSubstitution())
 	unwrapRecursive := unwrapCmd.Flag("recursive", "Recursive search for blocks in the bucket (Mimir has blocks nested to tenants folders)").Short('r').Default("false").Bool()
 	unwrapDir := unwrapCmd.Flag("data-dir", "Data directory in which to cache blocks and process tsdb.").Default("./data").String()
 	unwrapWait := unwrapCmd.Flag("wait-interval", "Wait interval between consecutive runs and bucket refreshes. Run once if 0.").Default("5m").Short('w').Duration()
@@ -100,7 +101,7 @@ func main() {
 	case importCmd.FullCommand():
 		exitCode(importMetrics(bkt, importFromFile, importBlockSize, importDir, importLabels, *importUpload, logger))
 	case unwrapCmd.FullCommand():
-		exitCode(unwrap(bkt, *unwrapRelabel, *unwrapRecursive, unwrapDir, unwrapWait, *unwrapDry, unwrapDst, unwrapMaxTime, unwrapSrc, logger))
+		exitCode(unwrap(bkt, *unwrapRelabel, *unwrapMetaRelabel, *unwrapRecursive, unwrapDir, unwrapWait, *unwrapDry, unwrapDst, unwrapMaxTime, unwrapSrc, logger))
 	}
 }
 

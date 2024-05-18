@@ -32,13 +32,21 @@ import (
 
 const metaExtLabels = "__meta_ext_labels"
 
-func unwrap(bkt objstore.Bucket, unwrapRelabel extkingpin.PathOrContent, recursive bool, dir *string, wait *time.Duration, unwrapDry bool, outConfig *extkingpin.PathOrContent, maxTime *model.TimeOrDurationValue, unwrapSrc *string, logger log.Logger) (err error) {
+func unwrap(bkt objstore.Bucket, unwrapRelabel extkingpin.PathOrContent, unwrapMetaRelabel extkingpin.PathOrContent, recursive bool, dir *string, wait *time.Duration, unwrapDry bool, outConfig *extkingpin.PathOrContent, maxTime *model.TimeOrDurationValue, unwrapSrc *string, logger log.Logger) (err error) {
 	relabelContentYaml, err := unwrapRelabel.Content()
 	if err != nil {
 		return fmt.Errorf("get content of relabel configuration: %w", err)
 	}
 	var relabelConfig []*relabel.Config
 	if err := yaml.Unmarshal(relabelContentYaml, &relabelConfig); err != nil {
+		return fmt.Errorf("parse relabel configuration: %w", err)
+	}
+	metaRelabelContentYaml, err := unwrapMetaRelabel.Content()
+	if err != nil {
+		return fmt.Errorf("get content of meta-relabel configuration: %w", err)
+	}
+	var metaRelabel []*relabel.Config
+	if err := yaml.Unmarshal(metaRelabelContentYaml, &metaRelabel); err != nil {
 		return fmt.Errorf("parse relabel configuration: %w", err)
 	}
 
@@ -72,7 +80,7 @@ func unwrap(bkt objstore.Bucket, unwrapRelabel extkingpin.PathOrContent, recursi
 					continue
 				}
 			}
-			if err := unwrapBlock(bkt, b, relabelConfig, *dir, unwrapDry, dst, logger); err != nil {
+			if err := unwrapBlock(bkt, b, relabelConfig, metaRelabel, *dir, unwrapDry, dst, logger); err != nil {
 				return err
 			}
 		}
@@ -90,7 +98,7 @@ func unwrap(bkt objstore.Bucket, unwrapRelabel extkingpin.PathOrContent, recursi
 	})
 }
 
-func unwrapBlock(bkt objstore.Bucket, b Block, relabelConfig []*relabel.Config, dir string, unwrapDry bool, dst objstore.Bucket, logger log.Logger) error {
+func unwrapBlock(bkt objstore.Bucket, b Block, relabelConfig []*relabel.Config, metaRelabel []*relabel.Config, dir string, unwrapDry bool, dst objstore.Bucket, logger log.Logger) error {
 	if err := runutil.DeleteAll(dir); err != nil {
 		return fmt.Errorf("unable to cleanup cache folder %s: %w", dir, err)
 	}
@@ -114,6 +122,11 @@ func unwrapBlock(bkt objstore.Bucket, b Block, relabelConfig []*relabel.Config, 
 	if err != nil {
 		return fmt.Errorf("fail to read meta.json for %s: %w", b.Id.String(), err)
 	}
+	lbls, keep := relabel.Process(labels.FromMap(origMeta.Thanos.Labels), metaRelabel...)
+	if !keep {
+		return nil
+	}
+	origMeta.Thanos.Labels = lbls.Map()
 	db, err := tsdb.OpenDBReadOnly(inDir, logger)
 	if err != nil {
 		return err
