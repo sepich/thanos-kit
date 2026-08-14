@@ -192,7 +192,10 @@ func streamSplitBlock(ctx context.Context, src *tsdb.Block, relabelConfig []*rel
 		}
 		slices.Sort(syms)
 		reader := &tenantBlockReader{src: src, refs: t.refs, keep: keep, symbols: syms}
-		id, werr := compactor.Write(outDir, reader, srcMeta.MinTime, srcMeta.MaxTime+1, nil)
+		// srcMeta.MaxTime is already an exclusive bound ([MinTime, MaxTime)) - passing
+		// MaxTime+1 here would spill the output meta 1ms past the source block and make
+		// contiguous outputs overlap (endless vertical compaction downstream).
+		id, werr := compactor.Write(outDir, reader, srcMeta.MinTime, srcMeta.MaxTime, nil)
 		if werr != nil {
 			return nil, fmt.Errorf("write tenant %s: %w", key, werr)
 		}

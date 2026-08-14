@@ -422,6 +422,21 @@ func sameSummaries(a, b map[string]*tenantSum) bool {
 	return true
 }
 
+// assertWithinSource fails for any output block whose meta time range escapes
+// the source block's half-open [mint, maxt) range.
+func assertWithinSource(t *testing.T, outDir string, ids []ulid.ULID, mint, maxt int64) {
+	t.Helper()
+	for _, id := range ids {
+		meta, err := metadata.ReadFromDir(path.Join(outDir, id.String()))
+		if err != nil {
+			t.Fatalf("read meta %s: %v", id, err)
+		}
+		if meta.MinTime < mint || meta.MaxTime > maxt {
+			t.Errorf("block %s range [%d, %d) escapes source range [%d, %d)", id, meta.MinTime, meta.MaxTime, mint, maxt)
+		}
+	}
+}
+
 // TestStreamMatchesHead is the differential oracle for the streaming (no-Head)
 // writer: on the same source block it must produce per-tenant output identical to
 // the Head path - same blocks, series, sample counts and isolated ext-labels.
@@ -455,6 +470,7 @@ func TestStreamMatchesHead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open block: %v", err)
 	}
+	srcBM := blk.Meta()
 	streamIDs, err := streamSplitBlock(context.Background(), blk, cfg, streamOut, origMeta, duration, logger)
 	blk.Close()
 	if err != nil {
@@ -469,6 +485,12 @@ func TestStreamMatchesHead(t *testing.T) {
 	if !sameSummaries(head, stream) {
 		t.Errorf("stream output differs from Head:\n head:   %v\n stream: %v", head, stream)
 	}
+	// Both paths must stay inside the source block's own half-open [MinTime,
+	// MaxTime) range: meta MaxTime is exclusive, so an output ending even 1ms
+	// past the source bound overlaps the next contiguous 2h block and feeds
+	// endless vertical compaction in a downstream Thanos compactor.
+	assertWithinSource(t, headOut, headIDs, srcBM.MinTime, srcBM.MaxTime)
+	assertWithinSource(t, streamOut, streamIDs, srcBM.MinTime, srcBM.MaxTime)
 	// value-level spot check: the 6000-float series and the transition series must
 	// be byte-faithful through the chunk copy.
 	if got := strings.Join(drainSeries(t, streamOut, streamIDs, `{prometheus="F"}`, `{__name__="disk"}`), ","); got != "f@0=1,f@1=2,h@2,h@3" {
