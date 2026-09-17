@@ -142,10 +142,17 @@ func unwrapBlock(bkt objstore.Bucket, b Block, relabelConfig []*relabel.Config, 
 		if cerr := blk.Close(); err == nil {
 			err = cerr
 		}
-		if err != nil {
+		if errors.Is(err, errStreamDuplicateSeries) {
+			// Series that are identical after stripping need their samples merged,
+			// which only the Head path does. streamSplitBlock fails before writing
+			// any tenant, so outDir is still empty.
+			level.Warn(logger).Log("msg", "--stream cannot write this block, falling back to the Head path", "block", b.Id, "err", err)
+			stream = false
+		} else if err != nil {
 			return err
 		}
-	} else {
+	}
+	if !stream {
 		db, derr := tsdb.OpenDBReadOnly(inDir, logger)
 		if derr != nil {
 			return derr

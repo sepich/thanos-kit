@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/go-kit/log"
+	"github.com/go-kit/log/level"
 	"github.com/oklog/ulid"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/relabel"
@@ -30,7 +33,7 @@ import (
 // symbol table to this tenant's referenced strings (see tenantIndexReader.Symbols).
 type tenantBlockReader struct {
 	src     *tsdb.Block
-	refs    []storage.SeriesRef                       // this tenant's series, in source (sorted) order
+	refs    []storage.SeriesRef                       // this tenant's series, sorted by output labels
 	keep    func(labels.Labels) (labels.Labels, bool) // relabel + ext-strip, applied per series
 	symbols []string                                  // sorted, deduped strings referenced by this tenant's output series
 }
@@ -70,10 +73,10 @@ func (t *tenantIndexReader) Postings(name string, values ...string) (index.Posti
 	return index.NewListPostings(t.refs), nil
 }
 
-// SortedPostings is identity: refs are already in source label-sorted order, and
-// stripping the tenant's constant ext-labels preserves that order. A relabel that
-// reorders kept labels would make the compactor's AddSeries fail loudly (no
-// silent corruption).
+// SortedPostings is identity: streamSplitBlock already put refs in output label
+// order. That is usually the source order, but not always - stripping labels can
+// move a series (see streamSplitBlock), and the compactor's AddSeries fails on any
+// series not strictly greater than the previous one.
 func (t *tenantIndexReader) SortedPostings(p index.Postings) index.Postings { return p }
 
 // Series returns the source series with its ext-labels stripped. The chunk metas
@@ -97,10 +100,25 @@ func (t *tenantIndexReader) Series(ref storage.SeriesRef, builder *labels.Scratc
 // streamSplitBlock is the no-Head equivalent of splitBlock: it writes one output
 // block per ext-label tenant by streaming chunks straight from src (see
 // tenantBlockReader), with the same ext-label split and per-block Thanos meta.
-// Peak memory is bounded by the largest single series, not the largest tenant.
-// Limitation: it relies on ext-strip preserving the source sort order, so a
-// relabel that rewrites/reorders kept labels is rejected by the compactor; and it
-// does not support tombstoned sources differently from splitBlock (the compactor
+// Peak memory is bounded by the largest single series, not the largest tenant,
+// except while a disordered tenant is sorted (see below).
+//
+// Output order: refs start in source order, which matches the output order only
+// while stripping labels does not move a series. It does move one when a stripped
+// label decides the source order - a "__*" label (it sorts before lowercase names,
+// so {__service="x", department=".."} precedes {arch=".."} and follows it once
+// stripped), an ext-label that is the last label of one series but not of a
+// similar one ({a="1", prometheus="A"} vs {a="1", b="2", prometheus="A"}), or a
+// relabel that rewrites kept labels. Discovery detects that per tenant with one
+// compare per series, and only such tenants are sorted (see sortTenant). Series
+// before the first misplaced one and after the last stay where they are; the range
+// between them is re-read and sorted by symbol-index keys, about 8 bytes per output
+// label plus 16 per series of that range, the whole tenant at worst. Series that become
+// identical after stripping cannot be written from one reader (their samples need
+// merging), so the block fails with errStreamDuplicateSeries before any tenant is
+// written.
+//
+// Tombstoned sources are not handled differently from splitBlock (the compactor
 // applies the source tombstones via tenantBlockReader.Tombstones).
 func streamSplitBlock(ctx context.Context, src *tsdb.Block, relabelConfig []*relabel.Config, outDir string, origMeta metadata.Meta, blockSize int64, logger log.Logger) (ids []ulid.ULID, err error) {
 	ir, err := src.Index()
@@ -137,9 +155,13 @@ func streamSplitBlock(ctx context.Context, src *tsdb.Block, relabelConfig []*rel
 	}
 	all = ir.SortedPostings(all)
 	type tenant struct {
-		refs []storage.SeriesRef
-		ext  labels.Labels
-		syms map[string]struct{} // distinct strings referenced by this tenant's output labels
+		refs     []storage.SeriesRef
+		ext      labels.Labels
+		syms     map[string]uint32 // distinct strings referenced by this tenant's output labels; the value is the index in symbols, set before the sort
+		symbols  []string          // syms, sorted
+		counts   labelCounts       // output labels per series, to size the sort
+		last     labels.Labels     // output labels of the previous series
+		disorder disorder
 	}
 	tenants := map[string]*tenant{}
 	var order []string
@@ -155,16 +177,26 @@ func streamSplitBlock(ctx context.Context, src *tsdb.Block, relabelConfig []*rel
 		}
 		t := tenants[key]
 		if t == nil {
-			t = &tenant{ext: ext, syms: map[string]struct{}{}}
+			t = &tenant{ext: ext, syms: map[string]uint32{}}
 			tenants[key] = t
 			order = append(order, key)
 		}
+		if len(t.refs) > 0 {
+			switch c := labels.Compare(out, t.last); {
+			case c == 0:
+				return nil, fmt.Errorf("tenant %s: %w: %s", key, errStreamDuplicateSeries, out)
+			case c < 0:
+				t.disorder.add(t.last, out)
+			}
+		}
 		t.refs = append(t.refs, all.At())
+		t.counts.add(len(out))
+		t.last = out
 		// Collect the symbols this tenant's output block will reference, so its
 		// Symbols() can be pruned to them (source strings are stable while src is open).
 		for _, l := range out {
-			t.syms[l.Name] = struct{}{}
-			t.syms[l.Value] = struct{}{}
+			t.syms[l.Name] = 0
+			t.syms[l.Value] = 0
 		}
 	}
 	if err := all.Err(); err != nil {
@@ -178,6 +210,30 @@ func streamSplitBlock(ctx context.Context, src *tsdb.Block, relabelConfig []*rel
 		_, _, out, ok := route(s)
 		return out, ok
 	}
+	// Sort (and check for duplicates) before writing anything, so a block that
+	// fails here leaves outDir empty for the caller to retry another way.
+	for _, key := range order {
+		t := tenants[key]
+		t.last = nil
+		t.symbols = make([]string, 0, len(t.syms))
+		for s := range t.syms {
+			t.symbols = append(t.symbols, s)
+		}
+		slices.Sort(t.symbols)
+		if t.disorder.minStart != nil {
+			for i, s := range t.symbols {
+				t.syms[s] = uint32(i) // overwrites existing keys, no map growth
+			}
+			begin := time.Now()
+			lo, hi, err := sortTenant(ir, t.refs, t.disorder, keep, t.symbols, t.syms, t.counts)
+			if err != nil {
+				return nil, fmt.Errorf("tenant %s: %w", key, err)
+			}
+			level.Info(logger).Log("msg", "stripped labels reorder series, sorted tenant", "tenant", key, "series", len(t.refs), "sorted", hi-lo, "duration", time.Since(begin))
+		}
+		t.disorder = disorder{}
+		t.syms = nil
+	}
 	compactor, err := tsdb.NewLeveledCompactor(ctx, nil, logger, []int64{blockSize}, chunkenc.NewPool(), nil)
 	if err != nil {
 		return nil, err
@@ -186,12 +242,7 @@ func streamSplitBlock(ctx context.Context, src *tsdb.Block, relabelConfig []*rel
 	extOf := map[ulid.ULID]labels.Labels{}
 	for _, key := range order {
 		t := tenants[key]
-		syms := make([]string, 0, len(t.syms))
-		for s := range t.syms {
-			syms = append(syms, s)
-		}
-		slices.Sort(syms)
-		reader := &tenantBlockReader{src: src, refs: t.refs, keep: keep, symbols: syms}
+		reader := &tenantBlockReader{src: src, refs: t.refs, keep: keep, symbols: t.symbols}
 		// srcMeta.MaxTime is already an exclusive bound ([MinTime, MaxTime)) - passing
 		// MaxTime+1 here would spill the output meta 1ms past the source block and make
 		// contiguous outputs overlap (endless vertical compaction downstream).
@@ -225,3 +276,8 @@ func streamSplitBlock(ctx context.Context, src *tsdb.Block, relabelConfig []*rel
 	}
 	return ids, nil
 }
+
+// errStreamDuplicateSeries means two source series of one tenant differ only in
+// stripped labels. Their output series are identical and their samples need
+// merging, which LeveledCompactor.Write cannot do from a single reader.
+var errStreamDuplicateSeries = errors.New("series differ only in stripped labels")
