@@ -12,7 +12,7 @@ import (
 	"testing"
 
 	"github.com/go-kit/log"
-	"github.com/oklog/ulid"
+	"github.com/oklog/ulid/v2"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/relabel"
 	"github.com/prometheus/prometheus/storage"
@@ -38,7 +38,7 @@ var matchAllTest = &labels.Matcher{Name: "__name__", Type: labels.MatchNotEqual,
 func buildSourceBlock(t *testing.T, dir string) ulid.ULID {
 	t.Helper()
 	ctx := context.Background()
-	bw, err := tsdb.NewBlockWriter(log.NewNopLogger(), dir, getCompatibleBlockDuration(math.MaxInt64))
+	bw, err := tsdb.NewBlockWriter(slogger(log.NewNopLogger()), dir, getCompatibleBlockDuration(math.MaxInt64))
 	if err != nil {
 		t.Fatalf("new block writer: %v", err)
 	}
@@ -121,11 +121,11 @@ func testRelabel(t *testing.T) []*relabel.Config {
 
 func openSourceQuerier(t *testing.T, dir string) (storage.Querier, func()) {
 	t.Helper()
-	db, err := tsdb.OpenDBReadOnly(dir, log.NewNopLogger())
+	db, err := tsdb.OpenDBReadOnly(dir, "", slogger(log.NewNopLogger()))
 	if err != nil {
 		t.Fatalf("open source db: %v", err)
 	}
-	q, err := db.Querier(context.Background(), 0, math.MaxInt64)
+	q, err := db.Querier(0, math.MaxInt64)
 	if err != nil {
 		t.Fatalf("source querier: %v", err)
 	}
@@ -160,7 +160,7 @@ func summarize(t *testing.T, outDir string, ids []ulid.ULID) map[string]*tenantS
 		}
 		sum := &tenantSum{resolution: meta.Thanos.Downsample.Resolution, src: src, series: map[string]int{}}
 
-		b, err := tsdb.OpenBlock(log.NewNopLogger(), bdir, nil)
+		b, err := tsdb.OpenBlock(slogger(log.NewNopLogger()), bdir, nil, nil)
 		if err != nil {
 			t.Fatalf("open block %s: %v", id, err)
 		}
@@ -168,7 +168,7 @@ func summarize(t *testing.T, outDir string, ids []ulid.ULID) map[string]*tenantS
 		if err != nil {
 			t.Fatalf("block querier %s: %v", id, err)
 		}
-		ss := bq.Select(false, nil, matchAllTest)
+		ss := bq.Select(context.Background(), false, nil, matchAllTest)
 		for ss.Next() {
 			s := ss.At()
 			n := 0
@@ -194,7 +194,7 @@ func summarize(t *testing.T, outDir string, ids []ulid.ULID) map[string]*tenantS
 // blockSymbols returns a block's on-disk symbol table (already sorted).
 func blockSymbols(t *testing.T, bdir string) []string {
 	t.Helper()
-	b, err := tsdb.OpenBlock(log.NewNopLogger(), bdir, nil)
+	b, err := tsdb.OpenBlock(slogger(log.NewNopLogger()), bdir, nil, nil)
 	if err != nil {
 		t.Fatalf("open block %s: %v", bdir, err)
 	}
@@ -218,7 +218,7 @@ func blockSymbols(t *testing.T, bdir string) []string {
 // referencedStrings returns every label name and value used by the block's series.
 func referencedStrings(t *testing.T, bdir string) map[string]struct{} {
 	t.Helper()
-	b, err := tsdb.OpenBlock(log.NewNopLogger(), bdir, nil)
+	b, err := tsdb.OpenBlock(slogger(log.NewNopLogger()), bdir, nil, nil)
 	if err != nil {
 		t.Fatalf("open block %s: %v", bdir, err)
 	}
@@ -229,13 +229,13 @@ func referencedStrings(t *testing.T, bdir string) map[string]struct{} {
 	}
 	defer bq.Close()
 	ref := map[string]struct{}{}
-	ss := bq.Select(false, nil, matchAllTest)
+	ss := bq.Select(context.Background(), false, nil, matchAllTest)
 	for ss.Next() {
-		for _, l := range ss.At().Labels() {
+		ss.At().Labels().Range(func(l labels.Label) {
 			// Labels alias the mmap freed at b.Close(); clone before storing.
 			ref[strings.Clone(l.Name)] = struct{}{}
 			ref[strings.Clone(l.Value)] = struct{}{}
-		}
+		})
 	}
 	if err := ss.Err(); err != nil {
 		t.Fatalf("select %s: %v", bdir, err)
@@ -268,7 +268,7 @@ func drainSeries(t *testing.T, outDir string, ids []ulid.ULID, wantExt, wantSeri
 		if extKey(meta.Thanos.Labels) != wantExt {
 			continue
 		}
-		b, err := tsdb.OpenBlock(log.NewNopLogger(), bdir, nil)
+		b, err := tsdb.OpenBlock(slogger(log.NewNopLogger()), bdir, nil, nil)
 		if err != nil {
 			t.Fatalf("open block %s: %v", id, err)
 		}
@@ -278,7 +278,7 @@ func drainSeries(t *testing.T, outDir string, ids []ulid.ULID, wantExt, wantSeri
 			t.Fatalf("block querier %s: %v", id, err)
 		}
 		defer bq.Close()
-		ss := bq.Select(false, nil, matchAllTest)
+		ss := bq.Select(context.Background(), false, nil, matchAllTest)
 		for ss.Next() {
 			s := ss.At()
 			if s.Labels().String() != wantSeries {
@@ -292,10 +292,10 @@ func drainSeries(t *testing.T, outDir string, ids []ulid.ULID, wantExt, wantSeri
 					ts, v := it.At()
 					sig = append(sig, fmt.Sprintf("f@%d=%g", ts, v))
 				case chunkenc.ValHistogram:
-					ts, _ := it.AtHistogram()
+					ts, _ := it.AtHistogram(nil)
 					sig = append(sig, fmt.Sprintf("h@%d", ts))
 				case chunkenc.ValFloatHistogram:
-					ts, _ := it.AtFloatHistogram()
+					ts, _ := it.AtFloatHistogram(nil)
 					sig = append(sig, fmt.Sprintf("fh@%d", ts))
 				}
 			}
@@ -467,7 +467,7 @@ func TestStreamMatchesHead(t *testing.T) {
 	if err := os.MkdirAll(streamOut, 0777); err != nil {
 		t.Fatal(err)
 	}
-	blk, err := tsdb.OpenBlock(logger, path.Join(inDir, id.String()), chunkenc.NewPool())
+	blk, err := tsdb.OpenBlock(slogger(logger), path.Join(inDir, id.String()), chunkenc.NewPool(), nil)
 	if err != nil {
 		t.Fatalf("open block: %v", err)
 	}
@@ -530,7 +530,7 @@ func TestUnwrapBlockE2E(t *testing.T) {
 		bktDir := t.TempDir()
 		id := buildSourceBlock(t, bktDir)
 		// give the source a Thanos meta.json (labels) so unwrapBlock reads real labels
-		b, err := tsdb.OpenBlock(logger, filepath.Join(bktDir, id.String()), nil)
+		b, err := tsdb.OpenBlock(slogger(logger), filepath.Join(bktDir, id.String()), nil, nil)
 		if err != nil {
 			t.Fatalf("open source block: %v", err)
 		}
@@ -539,7 +539,7 @@ func TestUnwrapBlockE2E(t *testing.T) {
 		if err := writeThanosMeta(bm, map[string]string{"src": "orig"}, 0, bktDir, logger); err != nil {
 			t.Fatalf("write source thanos meta: %v", err)
 		}
-		bkt, err := client.NewBucket(logger, []byte("{type: FILESYSTEM, config: {directory: "+bktDir+"}}"), "thanos-kit")
+		bkt, err := client.NewBucket(logger, []byte("{type: FILESYSTEM, config: {directory: "+bktDir+"}}"), "thanos-kit", nil)
 		if err != nil {
 			t.Fatalf("src bucket: %v", err)
 		}
@@ -547,7 +547,7 @@ func TestUnwrapBlockE2E(t *testing.T) {
 	}
 	dstBucket := func(t *testing.T) (objstore.Bucket, string) {
 		dstDir := t.TempDir()
-		bkt, err := client.NewBucket(logger, []byte("{type: FILESYSTEM, config: {directory: "+dstDir+"}}"), "thanos-kit")
+		bkt, err := client.NewBucket(logger, []byte("{type: FILESYSTEM, config: {directory: "+dstDir+"}}"), "thanos-kit", nil)
 		if err != nil {
 			t.Fatalf("dst bucket: %v", err)
 		}
@@ -633,7 +633,7 @@ func TestUnwrapBlockE2E(t *testing.T) {
 
 func writeSeriesBlock(t *testing.T, dir string, series []labels.Labels) ulid.ULID {
 	t.Helper()
-	bw, err := tsdb.NewBlockWriter(log.NewNopLogger(), dir, getCompatibleBlockDuration(math.MaxInt64))
+	bw, err := tsdb.NewBlockWriter(slogger(log.NewNopLogger()), dir, getCompatibleBlockDuration(math.MaxInt64))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -711,7 +711,7 @@ func TestUnderscoreLabels(t *testing.T) {
 			}
 
 			streamOut := t.TempDir()
-			blk, err := tsdb.OpenBlock(logger, path.Join(inDir, id.String()), chunkenc.NewPool())
+			blk, err := tsdb.OpenBlock(slogger(logger), path.Join(inDir, id.String()), chunkenc.NewPool(), nil)
 			if err != nil {
 				t.Fatal(err)
 			}

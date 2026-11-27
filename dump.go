@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
-	"github.com/oklog/ulid"
+	"github.com/oklog/ulid/v2"
 	"github.com/pkg/errors"
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/tsdb"
@@ -30,19 +30,19 @@ func dump(bkt objstore.Bucket, out io.Writer, ids *[]string, dir *string, mint, 
 		}
 	}
 	os.Mkdir(filepath.Join(*dir, "wal"), 0777)
-	return dumpSamples(out, *dir, *mint, *maxt, *match)
+	return dumpSamples(out, *dir, *mint, *maxt, *match, logger)
 }
 
 // https://github.com/prometheus/prometheus/blob/main/cmd/promtool/tsdb.go#L703
-func dumpSamples(out io.Writer, path string, mint, maxt int64, match string) (err error) {
-	db, err := tsdb.OpenDBReadOnly(path, nil)
+func dumpSamples(out io.Writer, path string, mint, maxt int64, match string, logger log.Logger) (err error) {
+	db, err := tsdb.OpenDBReadOnly(path, "", slogger(logger))
 	if err != nil {
 		return err
 	}
 	defer func() {
 		err = tsdb_errors.NewMulti(err, db.Close()).Err()
 	}()
-	q, err := db.Querier(context.Background(), mint, maxt)
+	q, err := db.Querier(mint, maxt)
 	if err != nil {
 		return err
 	}
@@ -52,7 +52,7 @@ func dumpSamples(out io.Writer, path string, mint, maxt int64, match string) (er
 	if err != nil {
 		return err
 	}
-	ss := q.Select(false, nil, matchers...)
+	ss := q.Select(context.Background(), false, nil, matchers...)
 
 	for ss.Next() {
 		series := ss.At()
@@ -65,11 +65,11 @@ func dumpSamples(out io.Writer, path string, mint, maxt int64, match string) (er
 			fmt.Fprintf(out, "%s%s %g %d\n", name, lbs, val, ts)
 		}
 		for it.Next() == chunkenc.ValFloatHistogram {
-			ts, fh := it.AtFloatHistogram()
+			ts, fh := it.AtFloatHistogram(nil)
 			fmt.Fprintf(out, "%s%s %s %d\n", name, lbs, fh.String(), ts)
 		}
 		for it.Next() == chunkenc.ValHistogram {
-			ts, h := it.AtHistogram()
+			ts, h := it.AtHistogram(nil)
 			fmt.Fprintf(out, "%s%s %s %d\n", name, lbs, h.String(), ts)
 		}
 		if it.Err() != nil {
@@ -78,7 +78,7 @@ func dumpSamples(out io.Writer, path string, mint, maxt int64, match string) (er
 	}
 
 	if ws := ss.Warnings(); len(ws) > 0 {
-		return tsdb_errors.NewMulti(ws...).Err()
+		return tsdb_errors.NewMulti(ws.AsErrors()...).Err()
 	}
 
 	if ss.Err() != nil {

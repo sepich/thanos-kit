@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"github.com/go-kit/log"
@@ -13,8 +14,8 @@ import (
 	"github.com/prometheus/prometheus/tsdb/index"
 	"github.com/thanos-io/objstore"
 	"github.com/thanos-io/thanos/pkg/block/metadata"
-	"golang.org/x/exp/slices"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -24,11 +25,12 @@ func analyze(bkt objstore.Bucket, id, dir *string, analyzeLimit *int, analyzeMat
 	if err := downloadBlock(ctx, *dir, *id, bkt, logger); err != nil {
 		return err
 	}
-	return analyzeBlock(*dir, *id, *analyzeLimit, *analyzeMatchers)
+	return analyzeBlock(*dir, *id, *analyzeLimit, *analyzeMatchers, logger)
 }
 
 // https://github.com/prometheus/prometheus/blob/main/cmd/promtool/tsdb.go#L415
-func analyzeBlock(path, blockID string, limit int, matchers string) error {
+func analyzeBlock(path, blockID string, limit int, matchers string, logger log.Logger) error {
+	ctx := context.Background()
 	var (
 		selectors []*labels.Matcher
 		err       error
@@ -39,7 +41,7 @@ func analyzeBlock(path, blockID string, limit int, matchers string) error {
 			return err
 		}
 	}
-	db, block, err := openBlock(path, blockID)
+	db, block, err := openBlock(path, blockID, logger)
 	if err != nil {
 		return err
 	}
@@ -67,7 +69,7 @@ func analyzeBlock(path, blockID string, limit int, matchers string) error {
 	}
 	defer ir.Close()
 
-	allLabelNames, err := ir.LabelNames(selectors...)
+	allLabelNames, err := ir.LabelNames(ctx, selectors...)
 	if err != nil {
 		return err
 	}
@@ -80,7 +82,7 @@ func analyzeBlock(path, blockID string, limit int, matchers string) error {
 	postingInfos := []postingInfo{}
 
 	printInfo := func(postingInfos []postingInfo) {
-		slices.SortFunc(postingInfos, func(a, b postingInfo) bool { return a.metric > b.metric })
+		slices.SortFunc(postingInfos, func(a, b postingInfo) int { return cmp.Compare(b.metric, a.metric) })
 
 		for i, pc := range postingInfos {
 			if i >= limit {
@@ -99,7 +101,7 @@ func analyzeBlock(path, blockID string, limit int, matchers string) error {
 		refs []storage.SeriesRef
 	)
 	if len(matchers) > 0 {
-		p, err = tsdb.PostingsForMatchers(ir, selectors...)
+		p, err = tsdb.PostingsForMatchers(ctx, ir, selectors...)
 		if err != nil {
 			return err
 		}
@@ -112,7 +114,7 @@ func analyzeBlock(path, blockID string, limit int, matchers string) error {
 		fmt.Printf("Matched series: %d\n", len(refs))
 		p = index.NewListPostings(refs)
 	} else {
-		p, err = ir.Postings("", "") // The special all key.
+		p, err = ir.Postings(ctx, "", "") // The special all key.
 		if err != nil {
 			return err
 		}
@@ -136,11 +138,11 @@ func analyzeBlock(path, blockID string, limit int, matchers string) error {
 			entries++
 		})
 		if first {
-			for _, l := range builder.Labels() {
+			builder.Labels().Range(func(l labels.Label) {
 				if l.Name != "__name__" {
 					splitLabels[l.Name] = true
 				}
-			}
+			})
 			first = false
 		}
 		for l, _ := range splitLabels {
@@ -186,7 +188,7 @@ func analyzeBlock(path, blockID string, limit int, matchers string) error {
 
 	postingInfos = postingInfos[:0]
 	for _, n := range allLabelNames {
-		values, err := ir.SortedLabelValues(n, selectors...)
+		values, err := ir.SortedLabelValues(ctx, n, nil, selectors...)
 		if err != nil {
 			return err
 		}
@@ -202,7 +204,7 @@ func analyzeBlock(path, blockID string, limit int, matchers string) error {
 
 	postingInfos = postingInfos[:0]
 	for _, n := range allLabelNames {
-		lv, err := ir.SortedLabelValues(n, selectors...)
+		lv, err := ir.SortedLabelValues(ctx, n, nil, selectors...)
 		if err != nil {
 			return err
 		}
@@ -212,12 +214,12 @@ func analyzeBlock(path, blockID string, limit int, matchers string) error {
 	printInfo(postingInfos)
 
 	postingInfos = postingInfos[:0]
-	lv, err := ir.SortedLabelValues("__name__", selectors...)
+	lv, err := ir.SortedLabelValues(ctx, "__name__", nil, selectors...)
 	if err != nil {
 		return err
 	}
 	for _, n := range lv {
-		postings, err := ir.Postings("__name__", n)
+		postings, err := ir.Postings(ctx, "__name__", n)
 		if err != nil {
 			return err
 		}
@@ -237,8 +239,8 @@ func analyzeBlock(path, blockID string, limit int, matchers string) error {
 	return nil
 }
 
-func openBlock(path, blockID string) (*tsdb.DBReadOnly, tsdb.BlockReader, error) {
-	db, err := tsdb.OpenDBReadOnly(path, nil)
+func openBlock(path, blockID string, logger log.Logger) (*tsdb.DBReadOnly, tsdb.BlockReader, error) {
+	db, err := tsdb.OpenDBReadOnly(path, "", slogger(logger))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -250,7 +252,7 @@ func openBlock(path, blockID string) (*tsdb.DBReadOnly, tsdb.BlockReader, error)
 		}
 	}
 
-	b, err := db.Block(blockID)
+	b, err := db.Block(blockID, tsdb.DefaultPostingsDecoderFactory)
 	if err != nil {
 		return nil, nil, err
 	}
