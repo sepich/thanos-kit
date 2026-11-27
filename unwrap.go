@@ -4,6 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"os"
+	"path"
+	"path/filepath"
+	"slices"
+	"strings"
+	"time"
+
 	"github.com/efficientgo/tools/extkingpin"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
@@ -21,13 +29,6 @@ import (
 	"github.com/thanos-io/thanos/pkg/model"
 	"github.com/thanos-io/thanos/pkg/runutil"
 	"gopkg.in/yaml.v2"
-	"math"
-	"os"
-	"path"
-	"path/filepath"
-	"slices"
-	"strings"
-	"time"
 )
 
 const metaExtLabels = "__meta_ext_labels"
@@ -189,11 +190,7 @@ func unwrapBlock(bkt objstore.Bucket, b Block, relabelConfig []*relabel.Config, 
 	return nil
 }
 
-// extractLabels splits given labels to two sets: `el` for the labels named in
-// `names` (the ext-labels) and `res` for the rest (dropping non-__name__ __
-// labels), preserving sort order. `names` must already be sorted (callers
-// memoize and sort it). Both results are freshly allocated (the Head retains
-// `res` by reference, so buffers must not be shared across calls).
+// extractLabels splits given labels to two sets: for given `names` and the rest without metaExtLabels preserving sort order
 func extractLabels(ls labels.Labels, names []string) (res labels.Labels, el labels.Labels) {
 	res = make(labels.Labels, 0, len(ls))
 	el = make(labels.Labels, 0, len(names))
@@ -201,8 +198,7 @@ func extractLabels(ls labels.Labels, names []string) (res labels.Labels, el labe
 	for i < len(ls) && j < len(names) {
 		switch {
 		// https://prometheus.io/docs/prometheus/latest/configuration/configuration/#relabel_config
-		// Labels starting with __ will be removed from the label set after target relabeling is completed.
-		case strings.HasPrefix(ls[i].Name, "__") && ls[i].Name != "__name__":
+		case strings.HasPrefix(ls[i].Name, "__meta_") || strings.HasPrefix(ls[i].Name, "__tmp"):
 			i++
 		case names[j] < ls[i].Name:
 			j++

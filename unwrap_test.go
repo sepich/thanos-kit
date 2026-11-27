@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path"
@@ -628,4 +629,110 @@ func TestUnwrapBlockE2E(t *testing.T) {
 			t.Errorf("meta-relabel drop must keep source block %s", id)
 		}
 	})
+}
+
+func writeSeriesBlock(t *testing.T, dir string, series []labels.Labels) ulid.ULID {
+	t.Helper()
+	bw, err := tsdb.NewBlockWriter(log.NewNopLogger(), dir, getCompatibleBlockDuration(math.MaxInt64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := bw.Appender(context.Background())
+	for _, s := range series {
+		if _, err := app.Append(0, s, 0, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := app.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	id, err := bw.Flush(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.MkdirAll(path.Join(dir, "wal"), 0777)
+	return id
+}
+
+// TestUnderscoreLabels: source __* labels are kept (stripping them reordered
+// series and broke --stream with "out-of-order series added"), while
+// relabel-internal __meta_*/__tmp* labels are dropped, on both paths.
+func TestUnderscoreLabels(t *testing.T) {
+	test_cases := []struct {
+		name string
+		in   []labels.Labels
+		want []string
+	}{
+		{"__ label before __name__", []labels.Labels{
+			labels.FromStrings("__descr", "a", "__name__", "m", "instance", "b", "prometheus", "A"),
+			labels.FromStrings("__descr", "b", "__name__", "m", "instance", "a", "prometheus", "A"),
+			labels.FromStrings("__name__", "m", "instance", "c", "prometheus", "A"),
+		}, []string{
+			`{__descr="a", __name__="m", instance="b"}`,
+			`{__descr="b", __name__="m", instance="a"}`,
+			`{__name__="m", instance="c"}`,
+		}},
+		{"__ label after __name__", []labels.Labels{
+			labels.FromStrings("__name__", "traces_target_info", "__service", "x", "department", "d", "prometheus", "A"),
+			labels.FromStrings("__name__", "traces_target_info", "arch", "amd64", "prometheus", "A"),
+		}, []string{
+			`{__name__="traces_target_info", __service="x", department="d"}`,
+			`{__name__="traces_target_info", arch="amd64"}`,
+		}},
+		{"relabel-internal labels dropped", []labels.Labels{
+			labels.FromStrings("__meta_src", "1", "__name__", "m", "prometheus", "A"),
+			labels.FromStrings("__name__", "n", "__tmp_src", "1", "prometheus", "A"),
+		}, []string{
+			`{__name__="m"}`,
+			`{__name__="n"}`,
+		}},
+	}
+	cfg := mustRelabel(t, "- target_label: __tmp_x\n  replacement: y\n- target_label: __meta_ext_labels\n  replacement: prometheus\n")
+	duration := getCompatibleBlockDuration(math.MaxInt64)
+	logger := log.NewNopLogger()
+	for _, tc := range test_cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inDir := path.Join(t.TempDir(), "in")
+			id := writeSeriesBlock(t, inDir, tc.in)
+			want := map[string]int{}
+			for _, s := range tc.want {
+				want[s] = 1
+			}
+
+			headOut := t.TempDir()
+			q, closeQ := openSourceQuerier(t, inDir)
+			headIDs, err := splitBlock(context.Background(), q, cfg, headOut, metadata.Meta{}, duration, 0, logger)
+			closeQ()
+			if err != nil {
+				t.Fatalf("splitBlock: %v", err)
+			}
+
+			streamOut := t.TempDir()
+			blk, err := tsdb.OpenBlock(logger, path.Join(inDir, id.String()), chunkenc.NewPool())
+			if err != nil {
+				t.Fatal(err)
+			}
+			streamIDs, err := streamSplitBlock(context.Background(), blk, cfg, streamOut, metadata.Meta{}, duration, logger)
+			blk.Close()
+			if err != nil {
+				t.Fatalf("streamSplitBlock: %v", err)
+			}
+
+			for name, got := range map[string]map[string]*tenantSum{
+				"head":   summarize(t, headOut, headIDs),
+				"stream": summarize(t, streamOut, streamIDs),
+			} {
+				tenant, ok := got[`{prometheus="A"}`]
+				if len(got) != 1 || !ok {
+					t.Fatalf("%s: tenants %v, want only {prometheus=\"A\"}", name, got)
+				}
+				if !maps.Equal(tenant.series, want) {
+					t.Errorf("%s: series %v, want %v", name, tenant.series, want)
+				}
+			}
+		})
+	}
 }
