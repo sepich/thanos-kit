@@ -1,4 +1,4 @@
-FROM golang:1.21 as builder
+FROM golang:1.26 AS builder
 WORKDIR /build
 # try to cache deps
 COPY go.mod go.sum ./

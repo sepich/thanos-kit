@@ -3,12 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"maps"
 	"path"
 	"slices"
 	"strings"
 
 	"github.com/go-kit/log"
-	"github.com/oklog/ulid"
+	"github.com/oklog/ulid/v2"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/relabel"
 	"github.com/prometheus/prometheus/storage"
@@ -66,7 +67,7 @@ func (t *tenantIndexReader) Symbols() index.StringIter { return index.NewStringL
 
 // Postings ignores the matcher and returns this tenant's series; on a single
 // block the compactor only asks for AllPostingsKey.
-func (t *tenantIndexReader) Postings(name string, values ...string) (index.Postings, error) {
+func (t *tenantIndexReader) Postings(_ context.Context, name string, values ...string) (index.Postings, error) {
 	return index.NewListPostings(t.refs), nil
 }
 
@@ -88,9 +89,7 @@ func (t *tenantIndexReader) Series(ref storage.SeriesRef, builder *labels.Scratc
 		return fmt.Errorf("series %d in tenant postings dropped by relabel: relabel is non-deterministic", ref)
 	}
 	builder.Reset()
-	for _, l := range out {
-		builder.Add(l.Name, l.Value)
-	}
+	out.Range(func(l labels.Label) { builder.Add(l.Name, l.Value) })
 	return nil
 }
 
@@ -122,7 +121,7 @@ func streamSplitBlock(ctx context.Context, src *tsdb.Block, relabelConfig []*rel
 	route := func(s labels.Labels) (key string, ext labels.Labels, out labels.Labels, keep bool) {
 		rl, k := relabel.Process(s, relabelConfig...)
 		if !k {
-			return "", nil, nil, false
+			return "", labels.EmptyLabels(), labels.EmptyLabels(), false
 		}
 		out, ext = extractLabels(rl, splitNames(rl.Get(metaExtLabels)))
 		return ext.String(), ext, out, true
@@ -131,7 +130,7 @@ func streamSplitBlock(ctx context.Context, src *tsdb.Block, relabelConfig []*rel
 	// Discovery: collect each tenant's source refs (in sorted postings order) and
 	// its ext-labels. Reads labels only; chunk bytes are not touched here.
 	k, v := index.AllPostingsKey()
-	all, err := ir.Postings(k, v)
+	all, err := ir.Postings(ctx, k, v)
 	if err != nil {
 		return nil, err
 	}
@@ -162,10 +161,10 @@ func streamSplitBlock(ctx context.Context, src *tsdb.Block, relabelConfig []*rel
 		t.refs = append(t.refs, all.At())
 		// Collect the symbols this tenant's output block will reference, so its
 		// Symbols() can be pruned to them (source strings are stable while src is open).
-		for _, l := range out {
+		out.Range(func(l labels.Label) {
 			t.syms[l.Name] = struct{}{}
 			t.syms[l.Value] = struct{}{}
-		}
+		})
 	}
 	if err := all.Err(); err != nil {
 		return nil, err
@@ -178,7 +177,7 @@ func streamSplitBlock(ctx context.Context, src *tsdb.Block, relabelConfig []*rel
 		_, _, out, ok := route(s)
 		return out, ok
 	}
-	compactor, err := tsdb.NewLeveledCompactor(ctx, nil, logger, []int64{blockSize}, chunkenc.NewPool(), nil)
+	compactor, err := tsdb.NewLeveledCompactor(ctx, nil, slogger(logger), []int64{blockSize}, chunkenc.NewPool(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -195,15 +194,14 @@ func streamSplitBlock(ctx context.Context, src *tsdb.Block, relabelConfig []*rel
 		// srcMeta.MaxTime is already an exclusive bound ([MinTime, MaxTime)) - passing
 		// MaxTime+1 here would spill the output meta 1ms past the source block and make
 		// contiguous outputs overlap (endless vertical compaction downstream).
-		id, werr := compactor.Write(outDir, reader, srcMeta.MinTime, srcMeta.MaxTime, nil)
+		written, werr := compactor.Write(outDir, reader, srcMeta.MinTime, srcMeta.MaxTime, nil)
 		if werr != nil {
 			return nil, fmt.Errorf("write tenant %s: %w", key, werr)
 		}
-		if id == (ulid.ULID{}) { // empty block (e.g. all samples tombstoned)
-			continue
+		for _, id := range written { // none for an empty block (e.g. all samples tombstoned)
+			extOf[id] = t.ext
+			ids = append(ids, id)
 		}
-		extOf[id] = t.ext
-		ids = append(ids, id)
 	}
 
 	// Per-block Thanos meta.json (R3): clone origMeta labels + overlay tenant ext labels.
@@ -212,13 +210,9 @@ func streamSplitBlock(ctx context.Context, src *tsdb.Block, relabelConfig []*rel
 		if rerr != nil {
 			return nil, fmt.Errorf("read %s metadata: %w", id, rerr)
 		}
-		l := make(map[string]string, len(origMeta.Thanos.Labels)+len(extOf[id]))
-		for k, v := range origMeta.Thanos.Labels {
-			l[k] = v
-		}
-		for _, e := range extOf[id] {
-			l[e.Name] = e.Value
-		}
+		l := map[string]string{}
+		maps.Copy(l, origMeta.Thanos.Labels)
+		maps.Copy(l, extOf[id].Map())
 		if werr := writeThanosMeta(meta.BlockMeta, l, origMeta.Thanos.Downsample.Resolution, outDir, logger); werr != nil {
 			return nil, fmt.Errorf("write %s metadata: %w", id, werr)
 		}

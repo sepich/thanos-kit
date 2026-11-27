@@ -2,13 +2,15 @@ package main
 
 import (
 	"fmt"
+	"github.com/alecthomas/kingpin/v2"
 	"github.com/efficientgo/tools/extkingpin"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/prometheus/common/version"
 	"github.com/thanos-io/objstore/client"
 	"github.com/thanos-io/thanos/pkg/model"
-	"gopkg.in/alecthomas/kingpin.v2"
+	slogkit "github.com/tjhop/slog-gokit"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -86,7 +88,7 @@ func main() {
 	if err != nil {
 		exitCode(err)
 	}
-	bkt, err := client.NewBucket(logger, objStoreYaml, "thanos-kit")
+	bkt, err := client.NewBucket(logger, objStoreYaml, "thanos-kit", nil)
 	if err != nil {
 		exitCode(err)
 	}
@@ -105,6 +107,10 @@ func main() {
 	case unwrapCmd.FullCommand():
 		exitCode(unwrap(bkt, *unwrapRelabel, *unwrapMetaRelabel, *unwrapRecursive, unwrapDir, unwrapWait, *unwrapDry, unwrapDst, unwrapMaxTime, unwrapSrc, *unwrapMaxOpen, *unwrapStream, logger))
 	}
+}
+
+func slogger(logger log.Logger) *slog.Logger {
+	return slog.New(slogkit.NewGoKitHandler(logger, nil))
 }
 
 func exitCode(err error) {

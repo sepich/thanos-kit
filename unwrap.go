@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path"
@@ -15,7 +16,7 @@ import (
 	"github.com/efficientgo/tools/extkingpin"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
-	"github.com/oklog/ulid"
+	"github.com/oklog/ulid/v2"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/relabel"
 	"github.com/prometheus/prometheus/storage"
@@ -55,7 +56,7 @@ func unwrap(bkt objstore.Bucket, unwrapRelabel extkingpin.PathOrContent, unwrapM
 	if err != nil {
 		return err
 	}
-	dst, err := client.NewBucket(logger, objStoreYaml, "thanos-kit")
+	dst, err := client.NewBucket(logger, objStoreYaml, "thanos-kit", nil)
 	if err != nil {
 		return err
 	}
@@ -135,7 +136,7 @@ func unwrapBlock(bkt objstore.Bucket, b Block, relabelConfig []*relabel.Config, 
 		// Experimental: copy chunks straight from the source block (no in-memory
 		// Head), so peak memory is O(largest single series) instead of O(largest
 		// tenant). Reuses LeveledCompactor via a per-tenant block view.
-		blk, berr := tsdb.OpenBlock(logger, path.Join(inDir, b.Id.String()), chunkenc.NewPool())
+		blk, berr := tsdb.OpenBlock(slogger(logger), path.Join(inDir, b.Id.String()), chunkenc.NewPool(), nil)
 		if berr != nil {
 			return berr
 		}
@@ -147,14 +148,14 @@ func unwrapBlock(bkt objstore.Bucket, b Block, relabelConfig []*relabel.Config, 
 			return err
 		}
 	} else {
-		db, derr := tsdb.OpenDBReadOnly(inDir, logger)
+		db, derr := tsdb.OpenDBReadOnly(inDir, "", slogger(logger))
 		if derr != nil {
 			return derr
 		}
 		defer func() {
 			err = tsdb_errors.NewMulti(err, db.Close()).Err()
 		}()
-		q, qerr := db.Querier(context.Background(), 0, math.MaxInt64)
+		q, qerr := db.Querier(0, math.MaxInt64)
 		if qerr != nil {
 			return qerr
 		}
@@ -192,27 +193,18 @@ func unwrapBlock(bkt objstore.Bucket, b Block, relabelConfig []*relabel.Config, 
 
 // extractLabels splits given labels to two sets: for given `names` and the rest without metaExtLabels preserving sort order
 func extractLabels(ls labels.Labels, names []string) (res labels.Labels, el labels.Labels) {
-	res = make(labels.Labels, 0, len(ls))
-	el = make(labels.Labels, 0, len(names))
-	i, j := 0, 0
-	for i < len(ls) && j < len(names) {
-		switch {
+	rb, eb := labels.NewScratchBuilder(ls.Len()), labels.NewScratchBuilder(len(names))
+	ls.Range(func(l labels.Label) {
+		switch _, ext := slices.BinarySearch(names, l.Name); {
 		// https://prometheus.io/docs/prometheus/latest/configuration/configuration/#relabel_config
-		case strings.HasPrefix(ls[i].Name, "__meta_") || strings.HasPrefix(ls[i].Name, "__tmp"):
-			i++
-		case names[j] < ls[i].Name:
-			j++
-		case ls[i].Name < names[j]:
-			res = append(res, ls[i])
-			i++
+		case strings.HasPrefix(l.Name, "__meta_") || strings.HasPrefix(l.Name, "__tmp"):
+		case ext:
+			eb.Add(l.Name, l.Value)
 		default:
-			el = append(el, ls[i])
-			i++
-			j++
+			rb.Add(l.Name, l.Value)
 		}
-	}
-	res = append(res, ls[i:]...)
-	return res, el
+	})
+	return rb.Labels(), eb.Labels()
 }
 
 // blockTenant is one open output block writer while its batch is being filled.
@@ -256,7 +248,7 @@ func splitBlock(ctx context.Context, q storage.Querier, relabelConfig []*relabel
 	route := func(s storage.Series) (key string, ext labels.Labels, out labels.Labels, keep bool) {
 		rl, k := relabel.Process(s.Labels(), relabelConfig...)
 		if !k {
-			return "", nil, nil, false
+			return "", labels.EmptyLabels(), labels.EmptyLabels(), false
 		}
 		out, ext = extractLabels(rl, splitNames(rl.Get(metaExtLabels)))
 		return ext.String(), ext, out, true
@@ -266,7 +258,7 @@ func splitBlock(ctx context.Context, q storage.Querier, relabelConfig []*relabel
 	// only (never iterates samples), so it is an index scan with no chunk decode.
 	tenants := map[string]labels.Labels{}
 	var order []string
-	ss := q.Select(false, nil, matchAll)
+	ss := q.Select(ctx, false, nil, matchAll)
 	for ss.Next() {
 		key, ext, _, keep := route(ss.At())
 		if !keep {
@@ -281,7 +273,7 @@ func splitBlock(ctx context.Context, q storage.Querier, relabelConfig []*relabel
 		return nil, err
 	}
 	if ws := ss.Warnings(); len(ws) > 0 {
-		return nil, tsdb_errors.NewMulti(ws...).Err()
+		return nil, tsdb_errors.NewMulti(ws.AsErrors()...).Err()
 	}
 
 	batch := maxOpen
@@ -298,7 +290,7 @@ func splitBlock(ctx context.Context, q storage.Querier, relabelConfig []*relabel
 		// Open one block writer per tenant in this batch.
 		writers := make(map[string]*blockTenant, end-start)
 		for _, key := range order[start:end] {
-			w, werr := tsdb.NewBlockWriter(logger, outDir, blockSize)
+			w, werr := tsdb.NewBlockWriter(slogger(logger), outDir, blockSize)
 			if werr != nil {
 				return nil, werr
 			}
@@ -306,7 +298,7 @@ func splitBlock(ctx context.Context, q storage.Querier, relabelConfig []*relabel
 		}
 
 		// One pass over the source; append each batch tenant's series to its head.
-		bss := q.Select(false, nil, matchAll)
+		bss := q.Select(ctx, false, nil, matchAll)
 		for bss.Next() {
 			s := bss.At()
 			key, _, out, keep := route(s)
@@ -336,12 +328,12 @@ func splitBlock(ctx context.Context, q storage.Querier, relabelConfig []*relabel
 						return nil, err
 					}
 				case chunkenc.ValHistogram:
-					ts, h := it.AtHistogram()
+					ts, h := it.AtHistogram(nil)
 					if _, err := bt.app.AppendHistogram(0, out, ts, h, nil); err != nil {
 						return nil, err
 					}
 				case chunkenc.ValFloatHistogram:
-					ts, fh := it.AtFloatHistogram()
+					ts, fh := it.AtFloatHistogram(nil)
 					if _, err := bt.app.AppendHistogram(0, out, ts, nil, fh); err != nil {
 						return nil, err
 					}
@@ -365,7 +357,7 @@ func splitBlock(ctx context.Context, q storage.Querier, relabelConfig []*relabel
 			return nil, err
 		}
 		if ws := bss.Warnings(); len(ws) > 0 {
-			return nil, tsdb_errors.NewMulti(ws...).Err()
+			return nil, tsdb_errors.NewMulti(ws.AsErrors()...).Err()
 		}
 
 		// Flush every tenant in this batch: exactly one block per tenant.
@@ -399,13 +391,9 @@ func splitBlock(ctx context.Context, q storage.Querier, relabelConfig []*relabel
 		if rerr != nil {
 			return nil, fmt.Errorf("read %s metadata: %w", id, rerr)
 		}
-		l := make(map[string]string, len(origMeta.Thanos.Labels)+len(extOf[id]))
-		for k, v := range origMeta.Thanos.Labels {
-			l[k] = v
-		}
-		for _, e := range extOf[id] {
-			l[e.Name] = e.Value
-		}
+		l := map[string]string{}
+		maps.Copy(l, origMeta.Thanos.Labels)
+		maps.Copy(l, extOf[id].Map())
 		if werr := writeThanosMeta(meta.BlockMeta, l, origMeta.Thanos.Downsample.Resolution, outDir, logger); werr != nil {
 			return nil, fmt.Errorf("write %s metadata: %w", id, werr)
 		}

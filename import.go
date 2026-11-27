@@ -6,7 +6,7 @@ import (
 	"github.com/alecthomas/units"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
-	"github.com/oklog/ulid"
+	"github.com/oklog/ulid/v2"
 	"github.com/pkg/errors"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/textparse"
@@ -36,17 +36,17 @@ func importMetrics(bkt objstore.Bucket, file *string, importBlockSize *time.Dura
 		return fmt.Errorf("create output dir: %w", err)
 	}
 
-	labels, err := parseFlagLabels(*importLabels)
+	thanosLabels, err := parseFlagLabels(*importLabels)
 	if err != nil {
 		return errors.Wrap(err, "parse thanos labels")
 	}
 
-	p := textparse.NewPromParser(inputFile.Bytes())
+	p := textparse.NewPromParser(inputFile.Bytes(), labels.NewSymbolTable(), false)
 	maxt, mint, err := getMinAndMaxTimestamps(p)
 	if err != nil {
 		return fmt.Errorf("getting min and max timestamp: %w", err)
 	}
-	ids, err := createBlocks(inputFile.Bytes(), mint, maxt, int64(*importBlockSize/time.Millisecond), 5000, *dir, true, labels, logger)
+	ids, err := createBlocks(inputFile.Bytes(), mint, maxt, int64(*importBlockSize/time.Millisecond), 5000, *dir, true, thanosLabels, logger)
 	if err != nil {
 		return fmt.Errorf("block creation: %w", err)
 	}
@@ -124,7 +124,7 @@ func createBlocks(input []byte, mint, maxt, maxBlockDuration int64, maxSamplesIn
 	blockDuration := getCompatibleBlockDuration(maxBlockDuration)
 	mint = blockDuration * (mint / blockDuration)
 
-	db, err := tsdb.OpenDBReadOnly(outputDir, nil)
+	db, err := tsdb.OpenDBReadOnly(outputDir, "", slogger(logger))
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +153,7 @@ func createBlocks(input []byte, mint, maxt, maxBlockDuration int64, maxSamplesIn
 			// also need to append samples throughout the whole block range. To allow that, we
 			// pretend that the block is twice as large here, but only really add sample in the
 			// original interval later.
-			w, err := tsdb.NewBlockWriter(logger, outputDir, 2*blockDuration)
+			w, err := tsdb.NewBlockWriter(slogger(logger), outputDir, 2*blockDuration)
 			if err != nil {
 				return fmt.Errorf("block writer: %w", err)
 			}
@@ -163,7 +163,7 @@ func createBlocks(input []byte, mint, maxt, maxBlockDuration int64, maxSamplesIn
 
 			ctx := context.Background()
 			app := w.Appender(ctx)
-			p := textparse.NewPromParser(input)
+			p := textparse.NewPromParser(input, labels.NewSymbolTable(), false)
 			samplesCount := 0
 			for {
 				e, err := p.Next()
@@ -180,7 +180,7 @@ func createBlocks(input []byte, mint, maxt, maxBlockDuration int64, maxSamplesIn
 				_, ts, v := p.Series()
 				if ts == nil {
 					l := labels.Labels{}
-					p.Metric(&l)
+					p.Labels(&l)
 					return fmt.Errorf("expected timestamp for series %v, got none", l)
 				}
 				if *ts < t {
@@ -194,7 +194,7 @@ func createBlocks(input []byte, mint, maxt, maxBlockDuration int64, maxSamplesIn
 				}
 
 				l := labels.Labels{}
-				p.Metric(&l)
+				p.Labels(&l)
 
 				if _, err := app.Append(0, l, *ts, v); err != nil {
 					return fmt.Errorf("add sample: %w", err)

@@ -38,7 +38,7 @@ func Test_e2e(t *testing.T) {
 
 	// import metrics to local objStore
 	logger := log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr))
-	bkt, err := client.NewBucket(logger, []byte("{type: FILESYSTEM, config: {directory: "+bktDir+"}}"), "thanos-kit")
+	bkt, err := client.NewBucket(logger, []byte("{type: FILESYSTEM, config: {directory: "+bktDir+"}}"), "thanos-kit", nil)
 	if err != nil {
 		t.Fatalf("Open bucket: %v", err)
 	}

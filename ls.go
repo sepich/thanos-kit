@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/oklog/ulid"
+	"github.com/oklog/ulid/v2"
 	"github.com/thanos-io/objstore"
 	"github.com/thanos-io/thanos/pkg/block"
 	"github.com/thanos-io/thanos/pkg/model"
@@ -46,7 +46,7 @@ func getBlocks(ctx context.Context, bkt objstore.Bucket, recursive bool, maxTime
 				}
 			}
 			return nil
-		}, objstore.WithRecursiveIter)
+		}, objstore.WithRecursiveIter())
 	} else {
 		err = bkt.Iter(ctx, "", func(name string) error {
 			if id, ok := block.IsBlockDir(name); ok && id.Time() < uint64(maxTime.PrometheusTimestamp()) {

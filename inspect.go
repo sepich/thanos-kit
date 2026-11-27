@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/go-kit/log"
-	"github.com/oklog/ulid"
+	"github.com/oklog/ulid/v2"
 	"github.com/olekukonko/tablewriter"
 	"github.com/pkg/errors"
 	"github.com/prometheus/common/model"
@@ -53,27 +53,27 @@ func inspect(bkt objstore.Bucket, recursive *bool, selector *[]string, sortBy *[
 }
 
 func parseFlagLabels(s []string) (labels.Labels, error) {
-	var lset labels.Labels
+	b := labels.NewScratchBuilder(len(s))
 	for _, l := range s {
 		parts := strings.SplitN(l, "=", 2)
 		if len(parts) != 2 {
-			return nil, errors.Errorf("unrecognized label %q", l)
+			return labels.EmptyLabels(), errors.Errorf("unrecognized label %q", l)
 		}
-		if !model.LabelName.IsValid(model.LabelName(parts[0])) {
-			return nil, errors.Errorf("unsupported format for label %s", l)
+		if !model.LegacyValidation.IsValidLabelName(parts[0]) {
+			return labels.EmptyLabels(), errors.Errorf("unsupported format for label %s", l)
 		}
 		val := parts[1]
 		if strings.Index(val, `"`) != -1 {
 			var err error
 			val, err = strconv.Unquote(parts[1])
 			if err != nil {
-				return nil, errors.Wrap(err, "unquote label value")
+				return labels.EmptyLabels(), errors.Wrap(err, "unquote label value")
 			}
 		}
-		lset = append(lset, labels.Label{Name: parts[0], Value: val})
+		b.Add(parts[0], val)
 	}
-	sort.Sort(lset)
-	return lset, nil
+	b.Sort()
+	return b.Labels(), nil
 }
 
 // read mata.json from all blocks in bucket
@@ -182,12 +182,13 @@ func printTable(blockMetas map[ulid.ULID]*Meta, selectorLabels labels.Labels, so
 // matchesSelector checks if blockMeta contains every label from
 // the selector with the correct value.
 func matchesSelector(blockMeta *Meta, selectorLabels labels.Labels) bool {
-	for _, l := range selectorLabels {
+	match := true
+	selectorLabels.Range(func(l labels.Label) {
 		if v, ok := blockMeta.Thanos.Labels[l.Name]; !ok || (l.Value != "*" && v != l.Value) {
-			return false
+			match = false
 		}
-	}
-	return true
+	})
+	return match
 }
 
 // getKeysAlphabetically return sorted keys of a given map
